@@ -1,0 +1,26 @@
+{
+  "model": {
+    "dynamics_rate": 0.1,
+    "activation": "relu",
+    "hebbian_learning_rate": 0.001,
+    "init_precision": 1.0,
+    "learn_precision_weights": true,
+    "learn_precision_bias": true,
+    "precision_parameterization": "softplus",
+    "error_activation": null,
+    "alpha": 1.0,
+    "use_bias": true,
+    "spatial_structure": "none"
+  },
+  "train": {
+    "iterations_per_sample": 50,
+    "learning_iterations_per_sample": 0,
+    "log_every": null,
+    "convergence_threshold": 0.0
+  },
+  "test": {
+    "iterations_per_sample": 50,
+    "log_every": null,
+    "convergence_threshold": 0.0
+  }
+}

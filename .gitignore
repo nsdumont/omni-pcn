@@ -1,0 +1,31 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+.env
+
+# Datasets downloaded by examples
+data/
+
+# Example outputs
+examples/*.png
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
