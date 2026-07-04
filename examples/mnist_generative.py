@@ -88,7 +88,7 @@ def main():
     for epoch in range(N_EPOCHS):
         sim.train(train_loader, data_map={l_image: 'image', l_label: 'label'}, epochs=1,
                   iterations_per_sample=0, learning_iterations_per_sample=N_ITERS,
-                  log_every=N_ITERS, verbose=False,
+                  verbose=False,
                   params_optimizer=param_optimizer, values_optimizer=train_val_optimizer)
         # Classification with a generative net: clamp the image, infer the label.
         results = sim.test(test_loader, data_map={l_image: 'image'}, record_map=acc_record,

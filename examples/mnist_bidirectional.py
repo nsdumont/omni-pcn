@@ -92,7 +92,7 @@ def main():
     for epoch in range(N_EPOCHS):
         sim.train(train_loader, data_map={l_image: 'image', l_label: 'label'}, epochs=1,
                   iterations_per_sample=0, learning_iterations_per_sample=N_ITERS,
-                  log_every=N_ITERS, verbose=False,
+                  verbose=False,
                   params_optimizer=param_optimizer, values_optimizer=val_optimizer)
         results = sim.test(test_loader, data_map={l_image: 'image'}, record_map=acc_record,
                            iterations_per_sample=N_ITERS, verbose=False,

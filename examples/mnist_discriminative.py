@@ -74,7 +74,7 @@ def main():
         t0 = time.perf_counter()
         sim.train(train_loader, data_map={l_input: 'image', l_output: 'label'}, epochs=1,
                   iterations_per_sample=0, learning_iterations_per_sample=N_ITERS,
-                  log_every=N_ITERS, verbose=False,
+                  verbose=False,
                   params_optimizer=param_optimizer, values_optimizer=val_optimizer)
         results = sim.test(test_loader, data_map={l_input: 'image'}, record_map=record,
                            iterations_per_sample=N_ITERS, verbose=False,

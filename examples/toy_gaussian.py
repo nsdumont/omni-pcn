@@ -55,7 +55,7 @@ def main():
     for epoch in range(N_EPOCHS):
         sim.train(loader, data_map={l_input: 'x'}, epochs=1,
                   iterations_per_sample=0, learning_iterations_per_sample=N_ITERS,
-                  log_every=N_ITERS, record_map=energy_record, verbose=False,
+                  record_map=energy_record, verbose=False,
                   params_optimizer=param_optimizer, values_optimizer=val_optimizer)
         if (epoch + 1) % 10 == 0:
             sigma = 1.0 / np.sqrt(np.exp(np.array(sim.params.precision_biases[0])))
