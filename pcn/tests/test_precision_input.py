@@ -78,7 +78,7 @@ def test_precision_tracks_source_not_pre(sample_data):
     def run(sample):
         results = sim.test(
             [sample], data_map={l1: 'input', l2: 'output', l_ctx: 'ctx'},
-            iterations_per_sample=1)
+            iterations_per_sample=1, return_logs=True)
         # conn 0, all samples, last log: (batch, 4)
         return jnp.asarray(results['precisions'][0])[:, -1, :]
 
@@ -114,7 +114,7 @@ def test_precision_input_multi_source_mixed(sample_data):
     sim.train([sample_data], data_map={l1: 'input', l3: 'output'},
               epochs=1, iterations_per_sample=10)
     results = sim.test([sample_data], data_map={l1: 'input', l3: 'output'},
-                       iterations_per_sample=5)
+                       iterations_per_sample=5, return_logs=True)
     for prec in results['precisions']:  # list over conns
         assert jnp.all(jnp.isfinite(prec))
         assert jnp.all(prec > 0)
@@ -160,7 +160,7 @@ def test_precision_input_self_error(sample_data):
     # Negative weights: large previous error -> lower precision (adaptive).
     sim.params.precision_weights[0] = -0.5 * jnp.eye(4)
     results = sim.test([sample_data], data_map={l1: 'input', l2: 'output'},
-                       iterations_per_sample=3)
+                       iterations_per_sample=3, return_logs=True)
     prec = jnp.asarray(results['precisions'][0])[:, -1, :]
     assert jnp.all(jnp.isfinite(prec))
     # ppw != 0 and carried errors are nonzero, so precision must deviate
@@ -184,7 +184,7 @@ def test_precision_input_precision_source(sample_data):
 
     sim = pcn.Simulation(net)
     results = sim.test([sample_data], data_map={l1: 'input', l3: 'output'},
-                       iterations_per_sample=3)
+                       iterations_per_sample=3, return_logs=True)
     for prec in results['precisions']:  # list over conns
         assert jnp.all(jnp.isfinite(prec))
         assert jnp.all(prec > 0)
@@ -219,7 +219,7 @@ def test_static_precision_with_custom_source(sample_data):
     sim = pcn.Simulation(net)
     results = sim.test([sample_data],
                        data_map={l1: 'input', l2: 'output', l_ctx: 'ctx'},
-                       iterations_per_sample=3)
+                       iterations_per_sample=3, return_logs=True)
     prec = jnp.asarray(results['precisions'][0])
     assert jnp.allclose(prec, 2.0, atol=1e-5)
 
@@ -244,7 +244,7 @@ def test_value_source_gradient_is_live():
         'output': jax.random.normal(jax.random.fold_in(key, 1), (2, 4)),
     }
     results = sim.test([sample], data_map={l1: 'input', l2: 'output'},
-                       iterations_per_sample=5)
+                       iterations_per_sample=5, return_logs=True)
     # results['values'] is a list over layers: (batch, n_logged, dim)
     ctx_values = jnp.asarray(results['values'][l_ctx._idx])[:, -1, :]
     # l_ctx is unclamped, predicted by nothing, and read only by the
@@ -295,7 +295,7 @@ def test_stochastic_with_custom_source(sample_data):
     sim = pcn.Simulation(net)
     results = sim.test([sample_data],
                        data_map={l1: 'input', l2: 'output', l_ctx: 'ctx'},
-                       iterations_per_sample=3, is_stochastic=True)
+                       iterations_per_sample=3, is_stochastic=True, return_logs=True)
     for prec in results['precisions']:  # list over conns
         assert jnp.all(jnp.isfinite(prec))
 

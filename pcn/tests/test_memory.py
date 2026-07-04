@@ -42,7 +42,7 @@ class TestMemoryRecurrence:
 
         sim = Simulation(net)
         res = sim.test([{'in': u.reshape(1, T, 1)}], data_map={l_in: 'in'},
-                       iterations_per_sample=T, log_every=1, feedforward_init=False)
+                       iterations_per_sample=T, log_every=1, feedforward_init=False, return_logs=True)
         rec_net = np.array(res['values'][net['memory_rec']])[0]   # (T, D)
         assert np.max(np.abs(rec_net - traj)) < 1e-4
 
@@ -64,7 +64,7 @@ class TestMemoryRecurrence:
         traj = _numpy_recurrence(mem._Abar_full, mem._Bbar_full, u)
         sim = Simulation(net)
         res = sim.test([{'in': u[None]}], data_map={l_in: 'in'},
-                       iterations_per_sample=T, log_every=1, feedforward_init=False)
+                       iterations_per_sample=T, log_every=1, feedforward_init=False, return_logs=True)
         rec_net = np.array(res['values'][net['memory_rec']])[0]
         assert np.max(np.abs(rec_net - traj)) < 1e-4
 
@@ -145,7 +145,7 @@ class TestMemoryModes:
                   log_every=1, feedforward_init=False)
         # Re-run inference to read the (isolated) recurrent trajectory.
         res = sim.test([{'in': u.reshape(1, T, 1)}], data_map={l_in: 'in'},
-                       iterations_per_sample=T, log_every=1, feedforward_init=False)
+                       iterations_per_sample=T, log_every=1, feedforward_init=False, return_logs=True)
         rec_net = np.array(res['values'][net['memory_rec']])[0]
         assert np.max(np.abs(rec_net - traj)) < 1e-4
 
@@ -160,7 +160,7 @@ class TestMemoryModes:
         u = np.cos(np.linspace(0, 4, T)).astype(np.float32)
         sim = Simulation(net)
         res = sim.test([{'in': u.reshape(1, T, 1)}], data_map={l_in: 'in'},
-                       iterations_per_sample=T, log_every=1, feedforward_init=False)
+                       iterations_per_sample=T, log_every=1, feedforward_init=False, return_logs=True)
         rec_net = np.array(res['values'][net['memory_rec']])[0]
         out_net = np.array(res['values'][net['memory_out']])[0]
         # Jacobi mirror: out[t] == rec[t-1].

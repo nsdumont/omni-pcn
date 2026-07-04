@@ -420,13 +420,11 @@ def test_error_activation_changes_runtime_error(sample_data):
     res_id = sim_id.test(
         [sample_data],
         data_map={layers_id[0]: 'input', layers_id[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
     res_tanh = sim_tanh.test(
         [sample_data],
         data_map={layers_tanh[0]: 'input', layers_tanh[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
 
     # errors_log is per-batch -> per-Predict-conn -> shape (n_logged, batch, dim)
     e_id = res_id['errors'][0][1][-1]      # batch 0, conn 1 (top), last log step
@@ -448,13 +446,11 @@ def test_error_activation_direct_matches_default(sample_data):
     res_def = sim_def.test(
         [sample_data],
         data_map={layers_def[0]: 'input', layers_def[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
     res_dir = sim_dir.test(
         [sample_data],
         data_map={layers_dir[0]: 'input', layers_dir[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
 
     for conn_def, conn_dir in zip(res_def['errors'][0], res_dir['errors'][0]):
         assert jnp.allclose(conn_def, conn_dir, atol=1e-6)
@@ -555,8 +551,7 @@ def test_memory_error_activation_runs_end_to_end(sample_data):
     res = sim.test(
         [sample_data],
         data_map={net._layers[0]: 'input', net._layers[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
     # All logged errors should be finite and bounded by tanh range (1.0)
     for conn_errs in res['errors'][0]:
         assert jnp.all(jnp.isfinite(conn_errs))
@@ -584,13 +579,11 @@ def test_memory_leak_zero_matches_base(sample_data):
     res_base = sim_base.test(
         [sample_data],
         data_map={net_base._layers[0]: 'input', net_base._layers[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
     res_leaky = sim_leaky.test(
         [sample_data],
         data_map={net_leaky0._layers[0]: 'input', net_leaky0._layers[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
     for e_base, e_leaky in zip(res_base['errors'][0], res_leaky['errors'][0]):
         assert jnp.allclose(e_base, e_leaky, atol=1e-5)
 
@@ -616,13 +609,11 @@ def test_memory_leak_nonzero_differs_from_base(sample_data):
     res_base = sim_base.test(
         [sample_data],
         data_map={net_base._layers[0]: 'input', net_base._layers[-1]: 'output'},
-        iterations_per_sample=10,
-    )
+        iterations_per_sample=10, return_logs=True)
     res_leaky = sim_leaky.test(
         [sample_data],
         data_map={net_leaky._layers[0]: 'input', net_leaky._layers[-1]: 'output'},
-        iterations_per_sample=10,
-    )
+        iterations_per_sample=10, return_logs=True)
     # At least one conn should differ
     differs = any(
         not jnp.allclose(eb, el, atol=1e-4)
@@ -689,8 +680,7 @@ def test_memory_precision_activation_runs_end_to_end(sample_data):
     res = sim.test(
         [sample_data],
         data_map={net._layers[0]: 'input', net._layers[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
     for conn_precs in res['precisions'][0]:
         assert jnp.all(jnp.isfinite(conn_precs))
         # Softplus output is positive; leaky-mix of positives stays >= 0
@@ -718,13 +708,11 @@ def test_memory_precision_leak_zero_matches_base(sample_data):
     res_base = sim_base.test(
         [sample_data],
         data_map={net_base._layers[0]: 'input', net_base._layers[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
     res_leaky = sim_leaky.test(
         [sample_data],
         data_map={net_leaky0._layers[0]: 'input', net_leaky0._layers[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
     for p_base, p_leaky in zip(res_base['precisions'][0], res_leaky['precisions'][0]):
         assert jnp.allclose(p_base, p_leaky, atol=1e-5)
 
@@ -750,13 +738,11 @@ def test_memory_precision_leak_nonzero_differs_from_base(sample_data):
     res_base = sim_base.test(
         [sample_data],
         data_map={net_base._layers[0]: 'input', net_base._layers[-1]: 'output'},
-        iterations_per_sample=10,
-    )
+        iterations_per_sample=10, return_logs=True)
     res_leaky = sim_leaky.test(
         [sample_data],
         data_map={net_leaky._layers[0]: 'input', net_leaky._layers[-1]: 'output'},
-        iterations_per_sample=10,
-    )
+        iterations_per_sample=10, return_logs=True)
     differs = any(
         not jnp.allclose(pb, pl, atol=1e-4)
         for pb, pl in zip(res_base['precisions'][0], res_leaky['precisions'][0])
@@ -805,8 +791,7 @@ def test_memory_both_slots_compose(sample_data):
     res = sim.test(
         [sample_data],
         data_map={net._layers[0]: 'input', net._layers[-1]: 'output'},
-        iterations_per_sample=5,
-    )
+        iterations_per_sample=5, return_logs=True)
     for conn_errs in res['errors'][0]:
         assert jnp.all(jnp.isfinite(conn_errs))
     for conn_precs in res['precisions'][0]:
@@ -918,8 +903,8 @@ def test_layer_stochastic_runs_and_injects_noise(sample_data):
 
     sim = pcn.Simulation(net)
     dm = {net._layers[0]: 'input'}
-    ra = sim.test([sample_data], data_map=dm, iterations_per_sample=15)
-    rb = sim.test([sample_data], data_map=dm, iterations_per_sample=15)
+    ra = sim.test([sample_data], data_map=dm, iterations_per_sample=15, return_logs=True)
+    rb = sim.test([sample_data], data_map=dm, iterations_per_sample=15, return_logs=True)
     # values is indexed [layer] -> (batch, n_logs, dim)
     assert jnp.allclose(ra['values'][0], rb['values'][0])      # clamped input
     assert not jnp.allclose(ra['values'][1], rb['values'][1])  # free hidden
@@ -927,7 +912,7 @@ def test_layer_stochastic_runs_and_injects_noise(sample_data):
 
     # Reproducible: a fresh Simulation (same net seed) repeats the first run.
     sim2 = pcn.Simulation(_build())
-    rc = sim2.test([sample_data], data_map=dm, iterations_per_sample=15)
+    rc = sim2.test([sample_data], data_map=dm, iterations_per_sample=15, return_logs=True)
     assert jnp.allclose(ra['values'][1], rc['values'][1])
 
 
@@ -946,8 +931,8 @@ def test_error_stochastic_runs_and_injects_noise(sample_data):
 
     sim = pcn.Simulation(net)
     dm = {net._layers[0]: 'input'}
-    ra = sim.test([sample_data], data_map=dm, iterations_per_sample=15)
-    rb = sim.test([sample_data], data_map=dm, iterations_per_sample=15)
+    ra = sim.test([sample_data], data_map=dm, iterations_per_sample=15, return_logs=True)
+    rb = sim.test([sample_data], data_map=dm, iterations_per_sample=15, return_logs=True)
     assert not jnp.allclose(ra['values'][1], rb['values'][1])
     for conn_errs in ra['errors'][0]:
         assert jnp.all(jnp.isfinite(conn_errs))

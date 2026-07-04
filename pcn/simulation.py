@@ -499,7 +499,7 @@ class Simulation:
         is_stochastic: bool = False,
         log_initial: bool = False,
         feedforward_init: bool = True,
-        return_logs: bool = True,
+        return_logs: bool = False,
     ) -> Dict[str, Any]:
         """
         Run inference and apply recording functions to collect results.
@@ -530,14 +530,15 @@ class Simulation:
                 the network to set non-clamped layer values. If False, skip
                 that propagation — non-clamped values start at zero and
                 inference relaxes from there.
-            return_logs: If True (default), accumulate the full per-iteration
+            return_logs: If True, accumulate the full per-iteration
                 ``values``/``errors``/``precisions``/``deltas`` trajectories for
                 **every batch** in the returned dict. This holds
                 ``O(n_batches * batch * sum(dims) * n_logged)`` arrays on-device
-                and OOMs on large loaders / large conv nets. Set False when you
-                only need ``record_map`` metrics (e.g. accuracy over a full test
-                set): record functions still run on each batch's final state, but
-                the trajectory lists are left empty and freed per batch.
+                and OOMs on large loaders / large conv nets, so it is False by
+                default: record functions still run on each batch's final
+                state, but the trajectory lists are left empty and freed per
+                batch. Set True when you need full relaxation trajectories
+                (e.g. settling-dynamics plots on a small loader).
 
         Returns:
             Dict with 'energies' (list of per-batch mean energies) and one

@@ -63,11 +63,16 @@ if TYPE_CHECKING:
 # ============================================================================
 
 def _parse_conv_params(pre_dim, post_dim, kernel_size, input_shape,
-                       stride, padding, is_transconv=False):
+                       stride, padding, is_transconv=False, pool=None):
     """Parse convolution parameters and compute output shape + channels.
 
     Returns a dict with: in_channels, out_channels, kernel_size, stride,
     padding, input_shape, output_shape.
+
+    ``pool``: optional ``(pool_size, pool_stride)`` of (h, w) tuples for a
+    fused post-conv spatial pool (VALID, non-overlapping by default). When
+    given, ``output_shape`` is the *pooled* spatial extent and ``out_channels``
+    is derived against it, so ``post_dim`` must match the pooled feature size.
     """
     kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else tuple(kernel_size)
     stride = (stride, stride) if isinstance(stride, int) else tuple(stride)
@@ -103,6 +108,17 @@ def _parse_conv_params(pre_dim, post_dim, kernel_size, input_shape,
             pW_lo, pW_hi = padding[1]
             H_out = (H_in + pH_lo + pH_hi - kH) // sH + 1
             W_out = (W_in + pW_lo + pW_hi - kW) // sW + 1
+
+    # Fused spatial pool over the conv output (VALID). The conv produces
+    # (H_out, W_out); pooling shrinks that to the post layer's spatial extent.
+    if pool is not None:
+        (pH, pW), (psH, psW) = pool
+        if H_out < pH or W_out < pW:
+            raise ValueError(
+                f"pool window ({pH}, {pW}) is larger than the conv output "
+                f"({H_out}, {W_out}); reduce the pool size or stride.")
+        H_out = (H_out - pH) // psH + 1
+        W_out = (W_out - pW) // psW + 1
 
     output_shape = (H_out, W_out)
     spatial_in = H_in * W_in
@@ -178,6 +194,9 @@ def _setup_transform(obj, transformation, pre_dim, post_dim,
     obj.is_masked = False
     obj.weight_mask = None
     obj.post_activation_type_id = 0  # Direct by default
+    obj.pool_type = 0                # 0 = none, 1 = max, 2 = avg
+    obj.pool_size = ()
+    obj.pool_stride = ()
 
     if transformation == 'linear':
         pass
@@ -198,6 +217,34 @@ def _setup_transform(obj, transformation, pre_dim, post_dim,
             stride if stride is not None else 1,
             padding if padding is not None else 0,
             is_transconv=False)
+        for k, v in info.items():
+            setattr(obj, k, v)
+        _attach_kernel_mask(obj, weight_mask)
+    elif transformation.startswith('conv-maxpool') or \
+            transformation.startswith('conv-avgpool'):
+        # 'conv-maxpool' / 'conv-avgpool' [+ integer window, default 2], e.g.
+        # 'conv-maxpool' (2x2) or 'conv-maxpool3' (3x3); stride = window
+        # (non-overlapping), matching torch's MaxPool2d(k, stride=k).
+        if kernel_size is None or input_shape is None:
+            raise ValueError(
+                f"'{transformation}' transformation requires kernel_size "
+                f"and input_shape")
+        obj.is_conv = True
+        obj.pool_type = 1 if 'maxpool' in transformation else 2
+        suffix = transformation.split('pool', 1)[1]
+        try:
+            p = int(suffix) if suffix else 2
+        except ValueError:
+            raise ValueError(
+                f"Invalid pool window in '{transformation}'. Use e.g. "
+                f"'conv-maxpool' or 'conv-maxpool3'.") from None
+        obj.pool_size = (p, p)
+        obj.pool_stride = (p, p)
+        info = _parse_conv_params(
+            pre_dim, post_dim, kernel_size, input_shape,
+            stride if stride is not None else 1,
+            padding if padding is not None else 0,
+            is_transconv=False, pool=(obj.pool_size, obj.pool_stride))
         for k, v in info.items():
             setattr(obj, k, v)
         _attach_kernel_mask(obj, weight_mask)
@@ -235,7 +282,8 @@ def _setup_transform(obj, transformation, pre_dim, post_dim,
     else:
         raise ValueError(
             f"Unknown transformation '{transformation}'. "
-            f"Choices: 'linear', 'linear-<activation>', 'conv', 'transconv', "
+            f"Choices: 'linear', 'linear-<activation>', 'conv', "
+            f"'conv-maxpool[N]', 'conv-avgpool[N]', 'transconv', "
             f"'banded{{N}}', 'masked'.")
 
 
@@ -690,6 +738,34 @@ class PredictConv(Predict):
     def __init__(self, pre, post, kernel_size, input_shape,
                  stride=1, padding=0, **kwargs):
         super().__init__(pre, post, transformation='conv',
+                         kernel_size=kernel_size, input_shape=input_shape,
+                         stride=stride, padding=padding, **kwargs)
+
+
+class PredictConvPool(Predict):
+    """
+    Convolutional predictive coding connection with a fused spatial pool.
+
+    Convenience wrapper for
+    ``Predict(..., transformation='conv-maxpool'/'conv-avgpool', ...)``.
+    Reproduces a VGG-style ``conv -> pool`` block as a single learnable Predict
+    edge: the forward prediction is ``pool(conv(f(pre)))`` and the error's
+    feedback to the pre value is the pool adjoint (max -> unpool to the argmax,
+    avg -> uniform upsample) composed with conv-transpose, both supplied by
+    autodiff. ``post.dim`` must equal ``out_channels * (H/pool) * (W/pool)``.
+
+    Args:
+        pool: ``'max'`` (default) or ``'avg'``.
+        pool_size: pooling window / stride (non-overlapping), default 2.
+    """
+
+    def __init__(self, pre, post, kernel_size, input_shape,
+                 pool='max', pool_size=2, stride=1, padding=0, **kwargs):
+        if pool not in ('max', 'avg'):
+            raise ValueError(f"pool must be 'max' or 'avg', got {pool!r}")
+        kind = 'maxpool' if pool == 'max' else 'avgpool'
+        suffix = '' if pool_size == 2 else str(pool_size)
+        super().__init__(pre, post, transformation=f'conv-{kind}{suffix}',
                          kernel_size=kernel_size, input_shape=input_shape,
                          stride=stride, padding=padding, **kwargs)
 

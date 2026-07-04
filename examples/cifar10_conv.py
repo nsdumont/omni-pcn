@@ -129,7 +129,7 @@ def main():
                   params_optimizer=param_optimizer, values_optimizer=val_optimizer)
         results = sim.test(test_loader, data_map={l_input: 'image'}, record_map=record,
                            iterations_per_sample=N_ITERS, verbose=False,
-                           values_optimizer=val_optimizer, return_logs=False)
+                           values_optimizer=val_optimizer)
         acc = np.mean(results['batch_accuracy'])
         print(f"Epoch {epoch + 1}/{N_EPOCHS} | test accuracy {acc * 100:.2f}% | "
               f"{time.perf_counter() - t0:.1f}s")

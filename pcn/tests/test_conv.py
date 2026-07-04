@@ -176,3 +176,94 @@ class TestConvLearning:
 
         W_after = new_params.predict_weights[0]
         assert not jnp.allclose(W_before, W_after), "Conv weights should change during training"
+
+
+class TestPredictConvPool:
+    """Test fused conv + spatial pool connections (conv-maxpool / conv-avgpool)."""
+
+    def _manual(self, x, W, pool, b=None, k_pad=1, pw=2):
+        xr = x.reshape(x.shape[0], W.shape[1], 8, 8)
+        y = jax.lax.conv_general_dilated(
+            xr, W, window_strides=(1, 1), padding=[(k_pad, k_pad)] * 2,
+            dimension_numbers=('NCHW', 'OIHW', 'NCHW'))
+        if b is not None:
+            y = y + b[None, :, None, None]
+        if pool == 'avg':
+            y = jax.lax.reduce_window(y, 0., jax.lax.add, (1, 1, pw, pw),
+                                      (1, 1, pw, pw), 'VALID') / (pw * pw)
+        else:
+            y = jax.lax.reduce_window(y, -jnp.inf, jax.lax.max, (1, 1, pw, pw),
+                                      (1, 1, pw, pw), 'VALID')
+        return np.asarray(y).reshape(x.shape[0], -1)
+
+    @pytest.mark.parametrize("pool", ["avg", "max"])
+    def test_shape_and_forward(self, pool):
+        """3ch 8x8 --conv3(SAME)--> 4ch 8x8 --pool2--> 4ch 4x4; forward == manual."""
+        net = pcn.PCNetwork(seed=0)
+        net.config(use_bias=False, learn_precision_weights=False,
+                   learn_precision_bias=False)
+        with net:
+            l_in = pcn.Layer(dim=3 * 8 * 8, activation=pcn.Direct(), label="in")
+            l_out = pcn.Layer(dim=4 * 4 * 4, activation=pcn.Direct(), label="out")
+            pcn.PredictConvPool(l_in, l_out, kernel_size=3, input_shape=(8, 8),
+                                pool=pool, pool_size=2, stride=1, padding=1)
+        net.build()
+        conn = net.structure.predict_conns[0]
+        W = np.asarray(net.params.predict_weights[0])
+        assert W.shape == (4, 3, 3, 3)
+        assert conn.out_channels == 4 and conn.output_spatial == (4, 4)
+        x = np.random.default_rng(1).standard_normal((2, 3 * 8 * 8)).astype('float32')
+        got = np.asarray(conn.apply(jnp.asarray(x), jnp.asarray(W)))
+        assert got.shape == (2, 4 * 4 * 4)
+        np.testing.assert_allclose(got, self._manual(x, W, pool), atol=1e-5)
+
+    def test_pool_adjoint_routing(self):
+        """Energy grad wrt pre value: avg routes to all inputs, max only to argmax."""
+        def build(pool):
+            net = pcn.PCNetwork(seed=0)
+            net.config(use_bias=False, learn_precision_weights=False,
+                       learn_precision_bias=False)
+            with net:
+                a = pcn.Layer(dim=1 * 4 * 4, activation=pcn.Direct(), label="a")
+                b = pcn.Layer(dim=1 * 2 * 2, activation=pcn.Direct(), label="b")
+                pcn.PredictConvPool(a, b, kernel_size=1, input_shape=(4, 4),
+                                    pool=pool, pool_size=2, stride=1, padding=0)
+            net.build()
+            return net.structure.predict_conns[0], jnp.asarray(net.params.predict_weights[0])
+
+        def nz(pool):
+            conn, W = build(pool)
+            pre = jnp.asarray(np.random.default_rng(2).standard_normal((1, 16)).astype('float32'))
+            g = jax.grad(lambda p: 0.5 * jnp.sum(conn.apply(p, W) ** 2))(pre)
+            return int((np.abs(np.asarray(g)) > 1e-9).sum())
+
+        assert nz('avg') == 16          # uniform upsample: every input contributes
+        assert nz('max') == 4           # one argmax per 2x2 window
+
+    @pytest.mark.parametrize("pool", ["avg", "max"])
+    def test_weights_learn(self, pool):
+        net = pcn.PCNetwork(seed=1)
+        net.config(use_bias=True, learn_precision_weights=False,
+                   learn_precision_bias=False)
+        with net:
+            l_in = pcn.Layer(dim=2 * 8 * 8, activation=pcn.LeakyRelu(), label="in")
+            l_out = pcn.Layer(dim=4 * 4 * 4, activation=pcn.Direct(), label="out")
+            pcn.PredictConvPool(l_in, l_out, kernel_size=3, input_shape=(8, 8),
+                                pool=pool, pool_size=2, stride=1, padding=1)
+        net.build()
+        W0 = np.asarray(net.params.predict_weights[0]).copy()
+        rng = np.random.default_rng(0)
+        sample = {'image': jnp.asarray(rng.standard_normal((4, 2 * 8 * 8)), dtype=jnp.float32),
+                  'target': jnp.asarray(rng.standard_normal((4, 4 * 4 * 4)), dtype=jnp.float32)}
+        new_params, *_ = run_batch(sample, net.params, net.structure,
+                                   ((0, 'image'), (1, 'target')), 20, 20, learning=True)
+        assert not np.allclose(W0, np.asarray(new_params.predict_weights[0]))
+
+    def test_pool_window_too_large_raises(self):
+        net = pcn.PCNetwork(seed=0)
+        with net:
+            a = pcn.Layer(dim=1 * 2 * 2, label="a")
+            b = pcn.Layer(dim=1 * 1 * 1, label="b")
+            with pytest.raises(ValueError, match="pool window"):
+                pcn.PredictConvPool(a, b, kernel_size=1, input_shape=(2, 2),
+                                    pool='max', pool_size=3)

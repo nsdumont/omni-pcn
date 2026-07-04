@@ -585,7 +585,7 @@ class TestProjectModulatePersistence:
         sim = pcn.Simulation(net)
         x = jnp.ones((1, 2), dtype=jnp.float32)
         res = sim.test([{'in': x}], data_map={l_in: 'in'},
-                       iterations_per_sample=6, log_every=1)
+                       iterations_per_sample=6, log_every=1, return_logs=True)
         mem_traj = np.array(res['values'][net['mem']])[0, :, 0]  # (iters,)
 
         # Jacobi recurrence invariant between consecutive carried states (x == 1).
@@ -618,10 +618,10 @@ class TestProjectModulatePersistence:
 
         res_a = pcn.Simulation(net_a).test(
             [{'in': x}], data_map={lin_a: 'in'},
-            iterations_per_sample=3, log_every=1)
+            iterations_per_sample=3, log_every=1, return_logs=True)
         res_b = pcn.Simulation(net_b).test(
             [{'in': x, 'src': s}], data_map={lin_b: 'in', src_b: 'src'},
-            iterations_per_sample=3, log_every=1)
+            iterations_per_sample=3, log_every=1, return_logs=True)
 
         err_a = np.array(res_a['errors'][p_a._idx])[0, -1]
         err_b = np.array(res_b['errors'][p_b._idx])[0, -1]

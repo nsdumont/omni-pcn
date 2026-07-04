@@ -24,7 +24,8 @@ def _apply_transform(pre_act, W, b=None, pre_value=None,
                      in_channels=0, out_channels=0,
                      kernel_size=(), stride=(1, 1), padding='SAME',
                      input_spatial=(), alpha=1.,
-                     post_activation_type: int = 0):
+                     post_activation_type: int = 0,
+                     pool_type: int = 0, pool_size=(), pool_stride=()):
     """Apply a weight transform shared by all connection types.
 
     Computes ``g(W f(x) + b)`` for dense / banded / residual paths and the
@@ -66,6 +67,22 @@ def _apply_transform(pre_act, W, b=None, pre_value=None,
             dimension_numbers=('NCHW', 'OIHW', 'NCHW'))
         if b is not None:
             y = y + b[None, :, None, None]
+        # Optional spatial pooling fused into the conv transform. Pooling is a
+        # weightless downsample over the (H, W) axes of the NCHW conv output;
+        # its adjoint (used to route the post-error back to the pre value
+        # during inference) is supplied by JAX autodiff — max -> unpool to the
+        # argmax position, average -> uniform upsample. A per-channel bias
+        # commutes with both, so adding it before the pool is exact.
+        if pool_type != 0:
+            pH, pW = pool_size
+            window = (1, 1, pH, pW)
+            strides = (1, 1, pool_stride[0], pool_stride[1])
+            if pool_type == 1:      # max pool
+                y = lax.reduce_window(
+                    y, -jnp.inf, lax.max, window, strides, 'VALID')
+            else:                   # avg pool (pool_type == 2)
+                y = lax.reduce_window(
+                    y, 0.0, lax.add, window, strides, 'VALID') / (pH * pW)
         out = y.reshape(B, -1)
     elif is_res:
         out = jnp.dot(pre_act, alpha * W.T) + pre_value
@@ -166,6 +183,12 @@ class PredictConnSpec(NamedTuple):
     padding: Union[str, tuple] = 'SAME'
     input_spatial: tuple = ()
     output_spatial: tuple = ()
+    # Spatial pooling fused after the conv (``transformation='conv-maxpool'`` /
+    # ``'conv-avgpool'``). pool_type: 0 = none, 1 = max, 2 = average. pool_size
+    # / pool_stride are (h, w) tuples over the conv output's spatial axes.
+    pool_type: int = 0
+    pool_size: tuple = ()
+    pool_stride: tuple = ()
     has_bias: bool = True
     is_res: bool = False
     label: str = ''
@@ -214,6 +237,8 @@ class PredictConnSpec(NamedTuple):
             stride=self.stride, padding=self.padding,
             input_spatial=self.input_spatial, alpha=self.alpha,
             post_activation_type=self.post_activation_type,
+            pool_type=self.pool_type, pool_size=self.pool_size,
+            pool_stride=self.pool_stride,
         )
 
     def prediction(self, pre_act, W, b, pre_value=None):
@@ -415,7 +440,8 @@ def _pm_get_post(post_idx, post_node_type, values, errors, post_slice=(),
 
 def _pm_apply(pre_act, W, is_conv, is_transconv, in_channels, out_channels,
               kernel_size, stride, padding, input_spatial,
-              post_activation_type: int = 0):
+              post_activation_type: int = 0,
+              pool_type: int = 0, pool_size=(), pool_stride=()):
     """Apply transform for Project/Modulate (no bias, no residual)."""
     return _apply_transform(
         pre_act, W, b=None, pre_value=None,
@@ -425,6 +451,7 @@ def _pm_apply(pre_act, W, is_conv, is_transconv, in_channels, out_channels,
         stride=stride, padding=padding,
         input_spatial=input_spatial, alpha=1.,
         post_activation_type=post_activation_type,
+        pool_type=pool_type, pool_size=pool_size, pool_stride=pool_stride,
     )
 
 
@@ -462,6 +489,9 @@ class ProjectConnSpec(NamedTuple):
     padding: Union[str, tuple] = 'SAME'
     input_spatial: tuple = ()
     output_spatial: tuple = ()
+    pool_type: int = 0
+    pool_size: tuple = ()
+    pool_stride: tuple = ()
     n_bands: int = 0
     pre_slices: tuple = ()
     post_slice: tuple = ()
@@ -478,6 +508,8 @@ class ProjectConnSpec(NamedTuple):
             self.in_channels, self.out_channels, self.kernel_size,
             self.stride, self.padding, self.input_spatial,
             post_activation_type=self.post_activation_type,
+            pool_type=self.pool_type, pool_size=self.pool_size,
+            pool_stride=self.pool_stride,
         )
 
     def get_pre(self, values, errors, activation_fns, precisions=()):
@@ -525,6 +557,9 @@ class ModulateConnSpec(NamedTuple):
     padding: Union[str, tuple] = 'SAME'
     input_spatial: tuple = ()
     output_spatial: tuple = ()
+    pool_type: int = 0
+    pool_size: tuple = ()
+    pool_stride: tuple = ()
     n_bands: int = 0
     pre_slices: tuple = ()
     post_slice: tuple = ()
@@ -541,6 +576,8 @@ class ModulateConnSpec(NamedTuple):
             self.in_channels, self.out_channels, self.kernel_size,
             self.stride, self.padding, self.input_spatial,
             post_activation_type=self.post_activation_type,
+            pool_type=self.pool_type, pool_size=self.pool_size,
+            pool_stride=self.pool_stride,
         )
 
     def get_pre(self, values, errors, activation_fns, precisions=()):

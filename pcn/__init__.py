@@ -50,7 +50,7 @@ __version__ = "0.1.0"
 # Core classes
 from .core.network import PCNetwork
 from .core.layer import Layer, NodeRef
-from .core.connections import Predict, PredictRes, PredictConv, PredictTransConv, Project, Modulate
+from .core.connections import Predict, PredictRes, PredictConv, PredictConvPool, PredictTransConv, Project, Modulate
 from .core.skip import Skip
 from .core.memory import Memory
 from .core.activations import (
@@ -87,6 +87,7 @@ __all__ = [
     'Predict',
     'PredictRes',
     'PredictConv',
+    'PredictConvPool',
     'PredictTransConv',
     'Project',
     'Modulate',
