@@ -973,7 +973,10 @@ class PCNetwork:
             if ppt == _Exp.type_id:
                 bias_val = float(np.log(init_p))
             elif ppt == _Softplus.type_id:
-                bias_val = float(np.log(np.expm1(init_p)))
+                # Stable inverse softplus: log(expm1(p)) = p + log1p(-exp(-p)).
+                # The naive form overflows expm1 for p >~ 700 (e.g. precisions
+                # initialised to a layer dimension for sum-convention scaling).
+                bias_val = float(init_p + np.log1p(-np.exp(-init_p)))
             elif ppt == _Direct.type_id:
                 bias_val = init_p
             else:

@@ -959,3 +959,22 @@ def test_stochastic_trains_stably(sample_data):
     )
     for e in sim.train_energies:
         assert jnp.all(jnp.isfinite(e))
+
+
+def test_large_init_precision_softplus_stable():
+    """Inverse-softplus precision init must not overflow for large precisions
+    (e.g. init_precision = layer dim for sum-convention scaling)."""
+    import numpy as np
+
+    net = pcn.PCNetwork(seed=0)
+    net.config(use_bias=True, learn_precision_weights=False, learn_precision_bias=False)
+    with net:
+        a = pcn.Layer(dim=4, label="a")
+        b = pcn.Layer(dim=3, label="b")
+        pcn.Predict(a, b, init_precision=32768.0)
+    net.build()
+    bias = np.asarray(net.params.precision_biases[0])
+    assert np.all(np.isfinite(bias))
+    # softplus(bias) should recover the requested precision
+    recovered = np.logaddexp(0.0, bias)
+    assert np.allclose(recovered, 32768.0, rtol=1e-6)

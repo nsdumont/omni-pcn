@@ -10,15 +10,15 @@ A JAX-based implementation of Predictive Coding Networks and Graphs for efficien
 PCN provides a flexible framework for building and training predictive coding networks. Key features include:
 
 - **Intuitive API**: Define networks using a context manager with `Layer`, `Predict`, `Project`, and `Modulate` connections
-- **JAX Backend**: Automatic GPU/Apple Silicon support
 - **Flexible Architectures**: Support for discriminative, generative, and bidirectional PC networks and graphs. Linear connections or convolutional.
-- **Composite building blocks**: Reusable groups of layers + connections — `Skip` (delayed identity shortcuts) and `Memory` (Legendre/Laguerre Memory Unit for online history) — drop straight into a `with net:` block
 - **Temporal dynamics**: Networks run over time (per-iteration timesteps via temporal clamping); `Project`/`Modulate` persist as integrating-drive state operators, enabling hand-drafted recurrences
 - **Stateful & stochastic neurons**: `Leaky` activations (leaky-integrator errors/precisions) and `Stochastic` activations (noise injection for sampling/generative inference)
-- **Multiple Learning Rules**: Can have projections trained with Hebbian, Oja, three-factor Hebbian, or Gradient Descent learning with customizable reward/loss functions (non-PC trained)
+- **Multiple Learning Rules**: Can have projections trained with Hebbian, Oja, three-factor Hebbian, or Gradient Descent learning with customizable reward/loss functions (non-PC trained connections algonside the PC ones)
 - **Learnable Precision**: Precision can be learned (softplus/exp/linear parameterizations), either as a single bias or as a function of other layer states
+- **Composite building blocks**: Reusable groups of layers + connections — `Skip` (delayed identity shortcuts) and `Memory` (Legendre/Laguerre Memory Unit for online history)
 - **Optimizers**: Helper functions for multi-transform with optax to set layer and param-type specific optimizers
-- **Hyperparameter optimization**: Helper script for hyperparameter optimization 
+- **JAX Backend**: GPU and Apple Silicon support
+
 
 
 ## Installation
@@ -82,6 +82,15 @@ with net:
 net.build()
 ```
 
+**Multi-input predictions.** `pre` can be a list: the pre values are
+concatenated before the transform, so several sources jointly predict one
+layer. Layers can also be sliced (`l[0:64]`).
+
+```python
+with net:
+    pcn.Predict([l_image, l_audio], l_shared)   # [image | audio] -> shared hidden
+```
+
 ### Optax
 
 ```python
@@ -92,6 +101,30 @@ param_optimizer = net.multi_transform(
         )
 ```
 
+The `"precision"` key routes a separate optimizer to the precision parameters
+(often a smaller LR than the predict weights — precision learning is stiffer).
+
+### Learnable precision
+
+Every `Predict` owns a precision (inverse-variance) on its error. It can be a
+learned per-dimension bias, or made **input-dependent** — a function of the pre
+activation by default, or of *any other* node(s) via `precision_input`
+(a `Layer`/`NodeRef`, possibly sliced, another Predict's `.error`/`.precision`,
+or a list of these, concatenated).
+
+```python
+with net:
+    # How much to trust this prediction is conditioned on a context state,
+    # not the input itself — e.g. downweight a sensory error when top-down
+    # context signals the input is unreliable.
+    pcn.Predict(l_input, l_hidden,
+                learn_precision_weights=True,
+                precision_input=l_context.value)
+```
+
+Value sources are read live (current iteration); error/precision sources use
+the previous iteration (Jacobi), so a connection may even read its own error.
+
 ### Training with the Simulation Class
 
 ```python
@@ -99,8 +132,7 @@ param_optimizer = net.multi_transform(
 sim = pcn.Simulation(net)
 sim.train(
     dataloader, # a torch dataloader with dict samples
-    data_map={l_input: 'image', l_output: 'label'}, # clamp these layers with keys from the data
-    # data_map={l_input: ('image','mask'), l_output: 'label'}, # support for partial clamping using a mask in the data
+    data_map={l_input: 'image', l_output: 'label'}, # clamp layers to data keys (see Clamping options)
     epochs=10,
     iterations_per_sample=100, 
     params_optimizer=param_optimizer,
@@ -109,6 +141,30 @@ sim.train(
 )
 
 print(f"Final energy: {sim.final_energy:.4f}")
+```
+
+### Clamping options
+
+`data_map` ties layers to sample keys. Beyond the hard clamp
+(`{l_input: 'image'}`), three variants:
+
+- **Masked (partial) clamp** — `{l: ('data', 'mask')}` with a 0/1 mask: clamp
+  only the observed dimensions and infer the rest. Useful for missing-data /
+  inpainting — clamp the known pixels, let inference fill the holes.
+- **Soft clamp / nudge** — the same tuple form with a mask in `(0, 1)`: the
+  layer is held a fraction `β` toward the data rather than pinned. This is
+  positive nudging (cf. the PCX paper); in cog-sci terms it lets a prior shape
+  the "input" the network actually perceives (as perception partly does).
+- **Temporal clamp** — pass a `(batch, T, dim)` array and set
+  `iterations_per_sample` to a multiple of `T`; each data timestep then gets
+  `iterations_per_sample // T` energy-relaxation iterations while the
+  non-clamped latents persist across the sequence. Good for temporal data with
+  strong correlations (or clock several relaxation steps per timestep).
+
+```python
+sim.train(loader,     data_map={l_input: ('image', 'mask')})       # partial / soft
+sim.train(seq_loader, data_map={l_in: 'seq'},                      # (batch, T, dim)
+          iterations_per_sample=4 * T)                             # 4 relax steps / timestep
 ```
 
 
