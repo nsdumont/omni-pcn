@@ -145,6 +145,17 @@ class Tanh(Activation):
         return jnp.tanh(x)
 
 
+class HardTanh(Activation):
+    """f(x) = clip(x, -1, 1) — piecewise-linear tanh."""
+    type_id = 13
+    init_type = 'xavier'
+    init_scale = 1.
+
+    @staticmethod
+    def fn(x):
+        return jnp.clip(x, -1.0, 1.0)
+
+
 class Sigmoid(Activation):
     """f(x) = 1 / (1 + exp(-x))."""
     type_id = 4
@@ -542,6 +553,7 @@ _ACTIVATION_CLASSES = (
     Exp,         # 10
     LayerNorm,   # 11
     NWTA,        # 12
+    HardTanh,    # 13
 )
 
 # Canonical activation function tuple, indexed by type_id. Imported by the
@@ -555,6 +567,8 @@ ACTIVATION_REGISTRY = {
     "relu": Relu,
     "softmax": Softmax,
     "tanh": Tanh,
+    "hard_tanh": HardTanh,
+    "hardtanh": HardTanh,
     "sigmoid": Sigmoid,
     "leaky_relu": LeakyRelu,
     "gelu": Gelu,

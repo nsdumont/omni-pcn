@@ -54,7 +54,7 @@ from .core.connections import Predict, PredictRes, PredictConv, PredictConvPool,
 from .core.skip import Skip
 from .core.memory import Memory
 from .core.activations import (
-    Activation, Direct, Relu, Softmax, Tanh, Sigmoid, LeakyRelu, Gelu, Elu,
+    Activation, Direct, Relu, Softmax, Tanh, HardTanh, Sigmoid, LeakyRelu, Gelu, Elu,
     LayerNorm, NWTA, Poisson, MemoryActivation, Leaky, StochasticActivation, Stochastic,
 )
 from .core.learning_rules import LearningRule, Hebbian, Oja, ThreeFactorHebbian, GradientDescent, NoLearning
@@ -99,6 +99,7 @@ __all__ = [
     'Relu',
     'Softmax',
     'Tanh',
+    'HardTanh',
     'Sigmoid',
     'LeakyRelu',
     'Gelu',

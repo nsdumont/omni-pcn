@@ -1277,3 +1277,24 @@ if __name__ == "__main__":
 
 
 
+
+
+def test_hard_tanh_activation():
+    """HardTanh: registered, clips to [-1, 1], usable as a layer activation."""
+    import jax.numpy as jnp
+    import pcn
+    from pcn.core.activations import ACTIVATIONS, activation_from_name
+
+    act = pcn.HardTanh()
+    x = jnp.array([-5.0, -1.0, 0.3, 1.0, 5.0])
+    expected = jnp.array([-1.0, -1.0, 0.3, 1.0, 1.0])
+    assert jnp.allclose(act.fn(x), expected)
+    assert jnp.allclose(ACTIVATIONS[act.type_id](x), expected)
+    assert isinstance(activation_from_name('hard_tanh'), pcn.HardTanh)
+
+    net = pcn.PCNetwork(seed=0)
+    with net:
+        a = pcn.Layer(dim=4, activation=pcn.HardTanh(), label="a")
+        b = pcn.Layer(dim=2, activation=pcn.HardTanh(), label="b")
+        pcn.Predict(a, b)
+    net.build()
