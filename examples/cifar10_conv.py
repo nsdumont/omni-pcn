@@ -1,18 +1,26 @@
-"""CIFAR-10 convolutional discriminative PCN.
+"""CIFAR-10 convolutional PCN — VGG-5 with fused conv+maxpool blocks.
 
-Four strided PredictConv stages (VGG-5 channel widths 128/256/512/512, all
-3x3 kernels, stride 2) downsample 3x32x32 images to a 512-channel 2x2 map,
-followed by a dense Predict to the 10-way output. Layers hold flattened
-feature maps; PredictConv handles the (channels, H, W) reshape internally, so
-each conv layer's dim must be out_channels * H_out * W_out — computed here
-with a small helper that mirrors PredictConv's shape logic.
+The architecture and training recipe follow the tuned iPC configuration from
+the PCX benchmark (Pinchetti et al., ICLR 2025; see examples/README.md). Four
+VGG blocks, each a single learnable `PredictConvPool` edge computing
+`maxpool(conv3x3(f(pre)))`, then a dense head:
 
-Two tuning notes that matter on conv PCNs: weight decay is destructive here
-(it suppresses train and test accuracy together), and data augmentation
-underfits at short training budgets — both are off. Expect roughly 58% test
-accuracy after 10 epochs; with horizontal-flip augmentation, a cosine LR
-schedule, and ~80 epochs this architecture reaches ~65%.
+    3x32x32 -> 128x16x16 -> 256x8x8 -> 512x4x4 -> 512x2x2 -> 10
 
+Three ingredients matter far more than the architecture:
+
+1. iPC: weights update on every one of the T=8 inference iterations
+   (`iterations_per_sample=0, learning_iterations_per_sample=T`), with the
+   AdamW warmup-cosine schedule stretched accordingly (steps = batches*epochs*T).
+2. Value inference by SGD+momentum (not Adam), with each connection's
+   precision initialised to its output dimension: the backend energy averages
+   over feature dims, so this makes every layer relax at the same rate
+   regardless of size (sum-over-dims convention). Without it, large conv
+   layers barely move and accuracy drops ~7pp.
+3. hard_tanh states and a hard label clamp.
+
+Expect ~76% test accuracy at 10 epochs, ~82% at the default 50 epochs
+(~10 min on an RTX 5090; the PCX reference for this arch/recipe is 85.5%).
 Downloads CIFAR-10 to ./data on first run.
 """
 import os
@@ -36,16 +44,22 @@ from torchvision import datasets, transforms
 
 import pcn
 
-BATCH_SIZE = 256
-N_EPOCHS = 10
-N_ITERS = 10  # inference/learning iterations per batch
+BATCH_SIZE = 128
+N_EPOCHS = 50
+T = 8            # inference iterations per batch = weight updates per batch (iPC)
+LR_W = 1.75e-4   # AdamW peak is 1.1x this; warmup 10%, decay to 0.1x
+WD = 2.6e-5
+LR_H = 0.744     # value-inference SGD step
+MOMENTUM_H = 0.65
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
-CIFAR10_STD = (0.2470, 0.2435, 0.2616)
+CIFAR10_STD = (0.2023, 0.1994, 0.2010)
 
 
 def get_cifar10_loaders(batch_size, data_dir="./data"):
     transform_train = transforms.Compose([
+        transforms.RandomHorizontalFlip(0.5),
+        transforms.RandomCrop(32, padding=4),
         transforms.ToTensor(),
         transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
     ])
@@ -70,14 +84,6 @@ def get_cifar10_loaders(batch_size, data_dir="./data"):
     return train_loader, test_loader
 
 
-def conv_output_dim(input_shape, out_channels, kernel_size, stride, padding):
-    """Output spatial shape and flat dim of a PredictConv post layer."""
-    h, w = input_shape
-    h_out = (h + 2 * padding - kernel_size) // stride + 1
-    w_out = (w + 2 * padding - kernel_size) // stride + 1
-    return (h_out, w_out), out_channels * h_out * w_out
-
-
 def batch_accuracy(output_values, labels):
     pred = jnp.argmax(output_values, axis=-1)
     true = jnp.argmax(labels, axis=-1)
@@ -88,51 +94,56 @@ def main():
     print(f"JAX devices: {jax.devices()}")
     train_loader, test_loader = get_cifar10_loaders(BATCH_SIZE)
 
-    s1_shape, s1_dim = conv_output_dim((32, 32), 128, kernel_size=3, stride=2, padding=1)
-    s2_shape, s2_dim = conv_output_dim(s1_shape, 256, kernel_size=3, stride=2, padding=1)
-    s3_shape, s3_dim = conv_output_dim(s2_shape, 512, kernel_size=3, stride=2, padding=1)
-    s4_shape, s4_dim = conv_output_dim(s3_shape, 512, kernel_size=3, stride=2, padding=1)
-
     net = pcn.PCNetwork(seed=10)
     net.config(use_bias=True, learn_precision_weights=False, learn_precision_bias=False)
+    channels = [128, 256, 512, 512]
     with net:
         l_input = pcn.Layer(dim=3 * 32 * 32, activation=pcn.Direct(), label="input")
-        l_conv1 = pcn.Layer(dim=s1_dim, activation=pcn.LeakyRelu(), label="conv1")
-        l_conv2 = pcn.Layer(dim=s2_dim, activation=pcn.LeakyRelu(), label="conv2")
-        l_conv3 = pcn.Layer(dim=s3_dim, activation=pcn.LeakyRelu(), label="conv3")
-        l_conv4 = pcn.Layer(dim=s4_dim, activation=pcn.LeakyRelu(), label="conv4")
-        l_output = pcn.Layer(dim=10, activation=pcn.Softmax(), label="output")
-
-        pcn.PredictConv(l_input, l_conv1, kernel_size=3, input_shape=(32, 32),
-                        stride=2, padding=1)
-        pcn.PredictConv(l_conv1, l_conv2, kernel_size=3, input_shape=s1_shape,
-                        stride=2, padding=1)
-        pcn.PredictConv(l_conv2, l_conv3, kernel_size=3, input_shape=s2_shape,
-                        stride=2, padding=1)
-        pcn.PredictConv(l_conv3, l_conv4, kernel_size=3, input_shape=s3_shape,
-                        stride=2, padding=1)
-        pcn.Predict(l_conv4, l_output)
+        prev, (h, w) = l_input, (32, 32)
+        for k, c in enumerate(channels):
+            h, w = h // 2, w // 2  # conv k3 s1 p1 keeps size; the 2x2 maxpool halves it
+            dim = c * h * w
+            l_conv = pcn.Layer(dim=dim, activation=pcn.HardTanh(), label=f"conv{k + 1}")
+            # init_precision = output dim -> sum-over-dims value dynamics (see docstring)
+            pcn.PredictConvPool(prev, l_conv, kernel_size=3, input_shape=(h * 2, w * 2),
+                                pool='max', pool_size=2, stride=1, padding=1,
+                                init_precision=float(dim))
+            prev = l_conv
+        l_output = pcn.Layer(dim=10, activation=pcn.Direct(), label="output")
+        pcn.Predict(prev, l_output, init_precision=10.0)
     net.build()
     print(f"Layer dims: {list(net.structure.layer_dims)}")
 
-    val_optimizer = optax.adam(0.5)
-    param_optimizer = optax.adam(5e-4)  # no weight decay: destructive on conv PCNs
+    # The param optimizer steps once per LEARNING ITERATION (T times per batch),
+    # so the schedule horizon is batches * epochs * T.
+    total_steps = len(train_loader) * N_EPOCHS * T
+    sched = optax.warmup_cosine_decay_schedule(
+        init_value=0.0, peak_value=1.1 * LR_W,
+        warmup_steps=int(0.10 * total_steps), decay_steps=total_steps,
+        end_value=0.1 * LR_W)
+    param_optimizer = optax.adamw(sched, weight_decay=WD)
+    val_optimizer = optax.sgd(LR_H, momentum=MOMENTUM_H)
 
     sim = pcn.Simulation(net)
     record = {'batch_accuracy': ((l_output.value, 'label'), batch_accuracy)}
+    # Evaluation is a pure feedforward pass: one iteration with a zero-LR value
+    # optimizer leaves every state at its feedforward init.
+    eval_opt = optax.sgd(0.0)
 
+    best = 0.0
     for epoch in range(N_EPOCHS):
         t0 = time.perf_counter()
         sim.train(train_loader, data_map={l_input: 'image', l_output: 'label'}, epochs=1,
-                  iterations_per_sample=0, learning_iterations_per_sample=N_ITERS,
+                  iterations_per_sample=0, learning_iterations_per_sample=T,
                   verbose=False,
                   params_optimizer=param_optimizer, values_optimizer=val_optimizer)
         results = sim.test(test_loader, data_map={l_input: 'image'}, record_map=record,
-                           iterations_per_sample=N_ITERS, verbose=False,
-                           values_optimizer=val_optimizer)
-        acc = np.mean(results['batch_accuracy'])
-        print(f"Epoch {epoch + 1}/{N_EPOCHS} | test accuracy {acc * 100:.2f}% | "
-              f"{time.perf_counter() - t0:.1f}s")
+                           iterations_per_sample=1, verbose=False,
+                           values_optimizer=eval_opt)
+        acc = float(np.mean(results['batch_accuracy']))
+        best = max(best, acc)
+        print(f"Epoch {epoch + 1}/{N_EPOCHS} | test accuracy {acc * 100:.2f}% "
+              f"(best {best * 100:.2f}%) | {time.perf_counter() - t0:.1f}s")
 
 
 if __name__ == "__main__":

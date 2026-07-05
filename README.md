@@ -5,6 +5,8 @@
 
 A JAX-based implementation of Predictive Coding Networks and Graphs for efficient neural network simulation and learning. Install as `pcn` (`import pcn`).
 
+Note that this is a platform for active research. It is subject to change/refactors in the near future. There are several features that add complexity & flexibilty in the current backend that are not demostrated in the examples. These are features for active, unreleased research projects.
+
 ## Summary
 
 PCN provides a flexible framework for building and training predictive coding networks. Key features include:
@@ -82,13 +84,29 @@ with net:
 net.build()
 ```
 
-**Multi-input predictions.** `pre` can be a list: the pre values are
-concatenated before the transform, so several sources jointly predict one
-layer. Layers can also be sliced (`l[0:64]`).
+**Arbitrary graph structure (the "omni-directional" part).** `Predict` connects
+any layer(s) to any layer, so you define whatever graph you want. When several
+sources feed one layer, *how* you wire them is a choice of generative
+factorization — not just an implementation detail:
+
+- **One joint prediction** — pass a list. `Predict([l_image, l_audio], l_shared)`
+  concatenates the pre values and predicts the target with a single weight,
+  error, and precision: one factor over the joint input. (Layers can also be
+  sliced, e.g. `l[0:64]`.)
+- **Separate predictions (product-of-experts)** — two edges,
+  `Predict(l_image, l_shared)` and `Predict(l_audio, l_shared)`, give the target
+  two *independent* predictions, each with its own error and precision. The
+  target relaxes to their **precision-weighted combination** — cue integration,
+  where each source (or a context signal, via `precision_input`) sets how much
+  it is trusted.
 
 ```python
-with net:
-    pcn.Predict([l_image, l_audio], l_shared)   # [image | audio] -> shared hidden
+# one joint factor: 1 prediction / 1 error / 1 precision
+pcn.Predict([l_image, l_audio], l_shared)
+
+# — or a different generative model — product-of-experts: 2 factors
+pcn.Predict(l_image, l_shared)     # each source predicts l_shared on its own;
+pcn.Predict(l_audio, l_shared)     # l_shared settles at the precision-weighted mix
 ```
 
 ### Optax
@@ -102,7 +120,7 @@ param_optimizer = net.multi_transform(
 ```
 
 The `"precision"` key routes a separate optimizer to the precision parameters
-(often a smaller LR than the predict weights — precision learning is stiffer).
+(often you want a smaller LR than the predict weights).
 
 ### Learnable precision
 
@@ -153,7 +171,7 @@ print(f"Final energy: {sim.final_energy:.4f}")
   inpainting — clamp the known pixels, let inference fill the holes.
 - **Soft clamp / nudge** — the same tuple form with a mask in `(0, 1)`: the
   layer is held a fraction `β` toward the data rather than pinned. This is
-  positive nudging (cf. the PCX paper); in cog-sci terms it lets a prior shape
+  somewhat like positive nudging (cf. the PCX paper); in cog-sci terms it lets a prior shape
   the "input" the network actually perceives (as perception partly does).
 - **Temporal clamp** — pass a `(batch, T, dim)` array and set
   `iterations_per_sample` to a multiple of `T`; each data timestep then gets
@@ -256,6 +274,32 @@ MNIST, and a convolutional CIFAR-10 classifier:
 ```bash
 uv run python examples/mnist_discriminative.py
 ```
+
+## Performance
+
+Comparsion to three public predictive-coding libraries on a discriminative MLP network with layer dims `784 → 500×3 → 10`, batch 256, `T` value-inference steps then one weight update (not iPC). A single NVIDIA RTX 5090 (32 GB, CUDA) on Linux was used. Each library was run in a different conda env for the different requriements. OmniPCN on
+`jax 0.9.2`; PCX (liukidar/pcx) on `jax 0.4.38`; JPC (thebuckleylab/jpc) on
+`jax 0.5.2`; pcn-torch (anonx3247/pcn-torch) on `torch 2.11`. Numbers are the
+median of 3×50-batch runs, each in a fresh process; peak memory is the device
+allocator's `peak_bytes_in_use`.
+
+| Library | ms / inference iter (no overhead) | train step, T=20 (ms/batch; includes overhead) | peak mem, width 500 (MiB) | peak mem, width 2048 (MiB) |
+|---|--:|--:|--:|--:|
+| **OmniPCN** | 0.11 | 2.75 | 163 | 261 |
+| PCX | 0.10 | 2.14 | 156 | 538 |
+| JPC | 0.06  | 11.94 | 97 | 603 |
+| pcn-torch | —  | 945  | 16 | 97 |
+
+Note that pcn-torch is unbatched so its "train step" is
+`256 × 3.7 ms/sample`  hence tiny memory but ~300×
+the wall-clock. JPC has a higher overhead so the per-iteration cost is low but the full train step time is higher. 
+
+Overall, PCX is the fastest PC package tested. OmniPCN has similar timing but additional feature (learnable precision and easy-to-set-up arbitrary-graph wiring which the others do not have). JPC offers different ODE solver backends which also sets it apart. 
+
+<!-- With respect to memory, in small width networks OmniPCN has a larger fixed
+footprint than PCX/JPC (because of the learnable-precision arrays), but
+scales the best with network width (donate-based buffer reuse keeps
+growth low). -->
 
 ## High level architecture
 
