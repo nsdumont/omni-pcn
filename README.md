@@ -29,8 +29,8 @@ PCN provides a flexible framework for building and training predictive coding ne
 
 ```bash
 # Clone the repository
-git clone https://github.com/nsdumont/omnipcn.git
-cd omnipcn
+git clone https://github.com/nsdumont/omni-pcn.git
+cd omni-pcn
 
 # Install with uv
 uv sync
@@ -48,8 +48,8 @@ uv sync --group cuda
 
 ```bash
 # Clone and install
-git clone https://github.com/nsdumont/omnipcn.git
-cd omnipcn
+git clone https://github.com/nsdumont/omni-pcn.git
+cd omni-pcn
 pip install -e .
 
 # GPU support and dev tools are managed as dependency groups (PEP 735);

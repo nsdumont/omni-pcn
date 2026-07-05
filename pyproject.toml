@@ -35,9 +35,9 @@ default-groups = ["dev", "plot"]
 
 
 [project.urls]
-Homepage = "https://github.com/nsdumont/omnipcn"
-Documentation = "https://github.com/nsdumont/omnipcn"
-Repository = "https://github.com/nsdumont/omnipcn"
+Homepage = "https://github.com/nsdumont/omni-pcn"
+Documentation = "https://github.com/nsdumont/omni-pcn"
+Repository = "https://github.com/nsdumont/omni-pcn"
 
 [build-system]
 requires = ["hatchling"]
