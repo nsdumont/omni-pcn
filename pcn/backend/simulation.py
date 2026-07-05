@@ -613,11 +613,14 @@ def _combined_step(
                 activation_fns, layer_activations, key)
             prediction = _add_prediction_noise(
                 conn, i, prediction, prec_in, ppw_i, ppb_i, is_stochastic, key)
-            log_prec = conn.log_precision_fn(prec_in, ppw_i, ppb_i)
-            prev_p_i = prev_precisions[i] if prev_precisions else None
-            precision = _activated_precision(
-                predict_precision_activations, conn, i, log_prec, prev_p_i,
-                key=key)
+            if conn.unit_precision:
+                precision = jnp.ones((prediction.shape[0], 1), dtype=prediction.dtype)  # provably 1.0 — see _inference_step
+            else:
+                log_prec = conn.log_precision_fn(prec_in, ppw_i, ppb_i)
+                prev_p_i = prev_precisions[i] if prev_precisions else None
+                precision = _activated_precision(
+                    predict_precision_activations, conn, i, log_prec, prev_p_i,
+                    key=key)
             post_val = conn.get_post(mod_vals)
             prev_e_i = prev_errors[i] if prev_errors else None
             residual = _activated_error(
@@ -1078,11 +1081,19 @@ def _inference_step(
             prediction = _add_prediction_noise(
                 conn, i, prediction, prec_in,
                 precision_weights[i], precision_biases[i], is_stochastic, key)
-            log_prec = conn.log_precision_fn(prec_in, precision_weights[i], precision_biases[i])
-            prev_p_i = precisions[i] if precisions else None
-            precision = _activated_precision(
-                predict_precision_activations, conn, i, log_prec, prev_p_i,
-                key=key)
+            if conn.unit_precision:
+                # Precision is provably 1.0 — skip the (loop-invariant) softplus
+                # of a runtime bias; a compile-time ones constant lets XLA fold
+                # ``1*err^2 - log 1`` to ``err^2`` in the value gradient. Shape
+                # (batch, 1) matches the non-learned precision's broadcast shape
+                # (bias is (1,)), keeping the carried/recomputed logs consistent.
+                precision = jnp.ones((prediction.shape[0], 1), dtype=prediction.dtype)
+            else:
+                log_prec = conn.log_precision_fn(prec_in, precision_weights[i], precision_biases[i])
+                prev_p_i = precisions[i] if precisions else None
+                precision = _activated_precision(
+                    predict_precision_activations, conn, i, log_prec, prev_p_i,
+                    key=key)
             post_val = conn.get_post(mod_vals)
             prev_e_i = errors[i] if errors else None
             residual = _activated_error(

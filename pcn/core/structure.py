@@ -200,6 +200,14 @@ class PredictConnSpec(NamedTuple):
     # ``linear`` / ``exp`` / ``softplus`` are the recommended choices because
     # they admit a closed-form inverse for bias initialisation.
     precision_activation_type: int = 9
+    # Static optimisation flag: True when this connection's precision is
+    # provably the constant 1.0 (precision not learned, init_precision == 1,
+    # standard stateless precision activation, no precision-targeting routing).
+    # The backend then skips deriving the precision array each inference
+    # iteration and folds the ``precision * err^2 - log precision`` energy term
+    # to ``err^2`` (identical result; XLA can't do this fold on its own because
+    # the precision comes from a runtime bias parameter). Set at build time.
+    unit_precision: bool = False
     # Activation type_id applied to the raw residual ``post_val - prediction``
     # before downstream consumers (energy summation, Project/Modulate, logs).
     # Default 0 (Direct = identity), preserving the standard PC residual.

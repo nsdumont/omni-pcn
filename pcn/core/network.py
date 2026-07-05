@@ -496,6 +496,25 @@ class PCNetwork:
                 slices.append(r.slice_bounds)
             return tuple(idxs), tuple(ntypes), tuple(slices)
 
+        # A connection's precision is provably the constant 1.0 (so the backend
+        # can fold it out of the inference hot loop) only when nothing can make
+        # it vary: not learned, init 1.0, a stateless precision activation, and
+        # no precision-targeting Project/Modulate anywhere in the graph.
+        _has_prec_routing = any(
+            getattr(c, 'post_node_type', 0) == 2
+            for c in (self._project_conns + self._modulate_conns))
+
+        def _is_unit_precision(conn):
+            pact = getattr(conn, 'precision_activation', None)
+            return (
+                not conn.learn_precision_weights
+                and not conn.learn_precision_bias
+                and float(getattr(conn, 'init_precision', 1.0)) == 1.0
+                and not _has_prec_routing
+                and not getattr(pact, 'has_memory', False)
+                and not getattr(pact, 'needs_key', False)
+            )
+
         def _predict_spec(conn):
             pin_idx, pin_ntypes, pin_slices = _precision_input_fields(conn)
             return PredictConnSpec(
@@ -525,6 +544,7 @@ class PCNetwork:
                 post_slice=conn.post_slice if conn.post_slice is not None else (),
                 precision_activation_type=getattr(conn, 'precision_activation_type',
                                                    getattr(conn, 'precision_param_type', 9)),
+                unit_precision=_is_unit_precision(conn),
                 error_activation_type=getattr(conn, 'error_activation_type', 0),
                 post_activation_type=getattr(conn, 'post_activation_type_id', 0),
                 is_masked=getattr(conn, 'is_masked', False),

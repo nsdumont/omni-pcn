@@ -5,7 +5,7 @@
 
 A JAX-based implementation of Predictive Coding Networks and Graphs for efficient neural network simulation and learning. Install as `pcn` (`import pcn`).
 
-Note that this is a platform for active research. It is subject to change/refactors in the near future. There are several features that add complexity & flexibilty in the current backend that are not demostrated in the examples. These are features for active, unreleased research projects.
+Note that this is a platform for active research. It is subject to change/refactors in the near future. There are several features that add complexity & flexibility in the current backend that are not demonstrated in the examples. These are features for active, unreleased research projects.
 
 ## Summary
 
@@ -15,7 +15,7 @@ PCN provides a flexible framework for building and training predictive coding ne
 - **Flexible Architectures**: Support for discriminative, generative, and bidirectional PC networks and graphs. Linear connections or convolutional.
 - **Temporal dynamics**: Networks run over time (per-iteration timesteps via temporal clamping); `Project`/`Modulate` persist as integrating-drive state operators, enabling hand-drafted recurrences
 - **Stateful & stochastic neurons**: `Leaky` activations (leaky-integrator errors/precisions) and `Stochastic` activations (noise injection for sampling/generative inference)
-- **Multiple Learning Rules**: Can have projections trained with Hebbian, Oja, three-factor Hebbian, or Gradient Descent learning with customizable reward/loss functions (non-PC trained connections algonside the PC ones)
+- **Multiple Learning Rules**: Can have projections trained with Hebbian, Oja, three-factor Hebbian, or Gradient Descent learning with customizable reward/loss functions (non-PC trained connections alongside the PC ones)
 - **Learnable Precision**: Precision can be learned (softplus/exp/linear parameterizations), either as a single bias or as a function of other layer states
 - **Composite building blocks**: Reusable groups of layers + connections — `Skip` (delayed identity shortcuts) and `Memory` (Legendre/Laguerre Memory Unit for online history)
 - **Optimizers**: Helper functions for multi-transform with optax to set layer and param-type specific optimizers
@@ -277,16 +277,18 @@ uv run python examples/mnist_discriminative.py
 
 ## Performance
 
-Comparsion to three public predictive-coding libraries on a discriminative MLP network with layer dims `784 → 500×3 → 10`, batch 256, `T` value-inference steps then one weight update (not iPC). A single NVIDIA RTX 5090 (32 GB, CUDA) on Linux was used. Each library was run in a different conda env for the different requriements. OmniPCN on
+Comparison to four public predictive-coding libraries on a discriminative MLP network with layer dims `784 → 500×3 → 10`, batch 256, `T` value-inference steps then one weight update (not iPC). A single NVIDIA RTX 5090 (32 GB, CUDA) on Linux was used. Each library was run in a different conda env for the different requirements. OmniPCN on
 `jax 0.9.2`; PCX (liukidar/pcx) on `jax 0.4.38`; JPC (thebuckleylab/jpc) on
-`jax 0.5.2`; pcn-torch (anonx3247/pcn-torch) on `torch 2.11`. Numbers are the
+`jax 0.5.2`; PRECO (bjornvz/PRECO, the ACM survey tutorial code) on `torch 2.11`;
+pcn-torch (anonx3247/pcn-torch) on `torch 2.11`. Numbers are the
 median of 3×50-batch runs, each in a fresh process; peak memory is the device
 allocator's `peak_bytes_in_use`.
 
 | Library | ms / inference iter (no overhead) | train step, T=20 (ms/batch; includes overhead) | peak mem, width 500 (MiB) | peak mem, width 2048 (MiB) |
 |---|--:|--:|--:|--:|
-| **OmniPCN** | 0.11 | 2.75 | 163 | 261 |
+| **OmniPCN** | 0.09 | 2.47 | 163 | 261 |
 | PCX | 0.10 | 2.14 | 156 | 538 |
+| PRECO | 0.12 | 3.00 | 71 | 292 |
 | JPC | 0.06  | 11.94 | 97 | 603 |
 | pcn-torch | —  | 945  | 16 | 97 |
 
@@ -294,12 +296,9 @@ Note that pcn-torch is unbatched so its "train step" is
 `256 × 3.7 ms/sample`  hence tiny memory but ~300×
 the wall-clock. JPC has a higher overhead so the per-iteration cost is low but the full train step time is higher. 
 
-Overall, PCX is the fastest PC package tested. OmniPCN has similar timing but additional feature (learnable precision and easy-to-set-up arbitrary-graph wiring which the others do not have). JPC offers different ODE solver backends which also sets it apart. 
+Overall the three cluster closely on the full train step, with PCX slightly ahead on its very low fixed overhead; OmniPCN has the lowest *per-inference-iteration* cost of the batched libraries (0.09 ms, below PCX's 0.10) so it pulls even or ahead at higher iteration counts and greater depth. OmniPCN adds learnable precision and easy-to-set-up arbitrary-graph wiring the others do not have; PRECO (the ACM survey's tutorial code) is a lean fixed-MLP/graph implementation; JPC offers different ODE solver backends which sets it apart.
 
-<!-- With respect to memory, in small width networks OmniPCN has a larger fixed
-footprint than PCX/JPC (because of the learnable-precision arrays), but
-scales the best with network width (donate-based buffer reuse keeps
-growth low). -->
+On memory, PRECO is the leanest at typical widths (plain fp32 PyTorch with no autograd graph or optimizer state), while OmniPCN scales the best with width — its donate-based buffer reuse keeps growth low, so it overtakes the others by width 2048, at the cost of a larger fixed footprint at small width from its learnable-precision arrays.
 
 ## High level architecture
 
