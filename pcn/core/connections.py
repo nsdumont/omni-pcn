@@ -21,6 +21,9 @@ All connection types accept a ``transformation`` parameter:
 - 'masked': dense matmul with a user-supplied ``weight_mask`` array of shape
     ``(post_dim, pre_dim)`` element-wise multiplied into ``W`` at init and
     after every weight update.
+- 'masked-<activation>': same as 'masked' but the masked matmul is wrapped in
+    a post-nonlinearity, ``g(W f(pre) + b)`` — combines the 'masked' and
+    'linear-<activation>' semantics (e.g. ``'masked-sigmoid'``).
 
 Predict, Project, and Modulate can all take a *list* for ``pre``,
 in which case the pre values are concatenated before the transform.
@@ -267,11 +270,19 @@ def _setup_transform(obj, transformation, pre_dim, post_dim,
             raise ValueError(
                 f"Invalid banded transformation '{transformation}'. "
                 f"Use format 'banded{{N}}' e.g. 'banded5'.")
-    elif transformation == 'masked':
+    elif transformation == 'masked' or transformation.startswith('masked-'):
+        if transformation.startswith('masked-'):
+            name = transformation[len('masked-'):]
+            try:
+                act = activation_from_name(name)
+            except ValueError as e:
+                raise ValueError(
+                    f"Invalid transformation '{transformation}': {e}") from None
+            obj.post_activation_type_id = act.type_id
         if weight_mask is None:
             raise ValueError(
-                "'masked' transformation requires a weight_mask argument "
-                f"of shape ({post_dim}, {pre_dim}).")
+                f"'{transformation}' transformation requires a weight_mask "
+                f"argument of shape ({post_dim}, {pre_dim}).")
         mask = np.asarray(weight_mask, dtype=np.float32)
         if mask.shape != (post_dim, pre_dim):
             raise ValueError(
@@ -284,7 +295,7 @@ def _setup_transform(obj, transformation, pre_dim, post_dim,
             f"Unknown transformation '{transformation}'. "
             f"Choices: 'linear', 'linear-<activation>', 'conv', "
             f"'conv-maxpool[N]', 'conv-avgpool[N]', 'transconv', "
-            f"'banded{{N}}', 'masked'.")
+            f"'banded{{N}}', 'masked', 'masked-<activation>'.")
 
 
 # ============================================================================

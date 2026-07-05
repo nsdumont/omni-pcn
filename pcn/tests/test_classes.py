@@ -1179,6 +1179,55 @@ class TestTransformationParam:
         # Zeros above and on diagonal, free below
         assert jnp.allclose(W * (1 - jnp.asarray(mask)), 0.0)
 
+    def test_predict_masked_activation(self):
+        """'masked-<activation>' sets BOTH the mask and the post-nonlinearity,
+        and a self-loop lateral Predict trains with the mask enforced."""
+        import pcn
+        import numpy as np
+        import jax.numpy as jnp
+        import optax
+
+        mask = (1.0 - np.eye(6)).astype(np.float32)   # no self-prediction
+        net = pcn.PCNetwork(seed=0)
+        with net:
+            l1 = pcn.Layer(dim=6)
+            l2 = pcn.Layer(dim=6, activation=pcn.Softmax())
+            pcn.Predict(l1, l2)
+            conn = pcn.Predict(l2, l2, transformation='masked-sigmoid',
+                               weight_mask=mask)
+        net.build()
+        assert conn.is_masked
+        assert conn.post_activation_type_id == pcn.Sigmoid().type_id
+        spec = net.structure.predict_conns[1]
+        assert spec.is_masked
+        assert spec.post_activation_type == pcn.Sigmoid().type_id
+        # train one batch; diagonal must stay exactly zero after updates
+        sim = pcn.Simulation(net)
+        batch = {"a": np.random.randn(4, 6).astype(np.float32),
+                 "b": np.eye(6, dtype=np.float32)[np.arange(4)]}
+        sim.train([batch], data_map={l1: "a", l2: "b"}, epochs=1,
+                  iterations_per_sample=0, learning_iterations_per_sample=3,
+                  log_every=3, verbose=False,
+                  params_optimizer=optax.adam(1e-2),
+                  values_optimizer=optax.sgd(0.1))
+        W = net.params.predict_weights[1]
+        assert jnp.allclose(jnp.diag(W), 0.0)
+        assert float(jnp.abs(W).max()) > 0.0
+
+    def test_predict_masked_bad_activation_raises(self):
+        """'masked-<bogus>' raises a helpful ValueError."""
+        import pcn
+        import numpy as np
+        import pytest
+
+        net = pcn.PCNetwork(seed=0)
+        with net:
+            l1 = pcn.Layer(dim=4)
+            l2 = pcn.Layer(dim=4)
+            with pytest.raises(ValueError, match="Invalid transformation"):
+                pcn.Predict(l1, l2, transformation='masked-nosuchact',
+                            weight_mask=np.ones((4, 4), dtype=np.float32))
+
     def test_project_masked_init(self):
         """Project respects weight_mask at init."""
         import pcn
