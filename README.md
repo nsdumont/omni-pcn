@@ -206,7 +206,7 @@ with net:
 online polynomial projection of an input signal's recent history as a fixed
 linear recurrence `m[t+1] = Ā m[t] + B̄ u[t]`, built entirely from `NoLearning`
 `Project`s (no backend changes). Each input channel gets its own
-`dims_per_input`-dimensional memory.
+`dims_per_input`-dimensional memory. 
 
 ```python
 with net:
@@ -223,7 +223,7 @@ with net:
 u_hat = mem.decode(m_state, t=0.5)          # or mem.C(0.5) for the readout matrix
 ```
 
-- **Modes:** `deterministic` adds an output-mirror layer so energy minimization
+<!-- - **Modes:** `deterministic` adds an output-mirror layer so energy minimization
   only shapes the readout, leaving the recurrence a pure LMU; `energy_coupled`
   lets readout errors correct the memory.
 - **Timing:** the recurrence advances **once per inference iteration**, not per
@@ -231,7 +231,7 @@ u_hat = mem.decode(m_state, t=0.5)          # or mem.C(0.5) for the readout matr
   with a `(batch, T, dim)` array) and set `iterations_per_sample = T`. `dt` is
   per-iteration — if `total_iterations ≠ T`, scale `dt` by `iters_per_timestep`.
   Use `feedforward_init=False` to avoid an off-by-one in the memory state.
-- `decode`/`C` are exact for the Legendre (`legt`) basis.
+- `decode`/`C` are exact for the Legendre (`legt`) basis. -->
 
 ### Stateful & stochastic activations
 
@@ -265,17 +265,8 @@ with net:
 # pass is_stochastic=True to sim.train / sim.test to sample predictions during inference
 ```
 
-### Examples
 
-Self-contained example scripts live in [examples/](examples/) — a toy
-Gaussian demo (no dataset needed), discriminative / generative / bidirectional
-MNIST, and a convolutional CIFAR-10 classifier:
-
-```bash
-uv run python examples/mnist_discriminative.py
-```
-
-## Performance
+<!-- ## Performance
 
 Comparison to four public predictive-coding libraries on a discriminative MLP network with layer dims `784 → 500×3 → 10`, batch 256, `T` value-inference steps then one weight update (not iPC). A single NVIDIA RTX 5090 (32 GB, CUDA) on Linux was used. Each library was run in a different conda env for the different requirements. OmniPCN on
 `jax 0.9.2`; PCX (liukidar/pcx) on `jax 0.4.38`; JPC (thebuckleylab/jpc) on
@@ -294,11 +285,11 @@ allocator's `peak_bytes_in_use`.
 
 Note that pcn-torch is unbatched so its "train step" is
 `256 × 3.7 ms/sample`  hence tiny memory but ~300×
-the wall-clock. JPC has a higher overhead so the per-iteration cost is low but the full train step time is higher. 
+the wall-clock. JPC has a higher overhead so the per-iteration cost is low but the full train step time is higher.  -->
 
-Overall the three cluster closely on the full train step, with PCX slightly ahead on its very low fixed overhead; OmniPCN has the lowest *per-inference-iteration* cost of the batched libraries (0.09 ms, below PCX's 0.10) so it pulls even or ahead at higher iteration counts and greater depth. OmniPCN adds learnable precision and easy-to-set-up arbitrary-graph wiring the others do not have; PRECO (the ACM survey's tutorial code) is a lean fixed-MLP/graph implementation; JPC offers different ODE solver backends which sets it apart.
+<!-- Overall the timing of OmniPCN, PCX, and PRECO are close on the full train step, with PCX slightly ahead with its low fixed overhead. OmniPCN adds learnable precision and easy-to-set-up arbitrary-graph wiring the others do not have. PRECO is a lean fixed-MLP/graph implementation. JPC offers different ODE solver backends which sets it apart.
 
-On memory, PRECO is the leanest at typical widths (plain fp32 PyTorch with no autograd graph or optimizer state), while OmniPCN scales the best with width — its donate-based buffer reuse keeps growth low, so it overtakes the others by width 2048, at the cost of a larger fixed footprint at small width from its learnable-precision arrays.
+On memory, PRECO is the leanest at typical widths (plain fp32 PyTorch with no autograd graph or optimizer state), while OmniPCN scales the best with width so it overtakes the others by width 2048, at the cost of a larger fixed footprint at small width from its learnable-precision arrays. -->
 
 ## High level architecture
 
@@ -314,7 +305,7 @@ pcn/
 └── simulation.py   # High-level Simulation class
 ```
 
-## Full repository structure
+<!-- ## Full repository structure
 
 ```
 omnipcn/
@@ -352,7 +343,7 @@ omnipcn/
 ├── pyproject.toml                  # Project config and dependencies
 ├── uv.lock                         # Locked dependency versions
 └── LICENSE
-```
+``` -->
 
 ## Testing
 
