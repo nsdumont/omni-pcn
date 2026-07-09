@@ -701,7 +701,7 @@ def _combined_step(
             reg_key = jax.random.fold_in(key, layer_idx) if key is not None else None
             E = E + reg.apply(mod_vals[layer_idx], key=reg_key, labels=labels)
 
-        # Train regularization
+        # Train regularization #TODO: have only one toye of reg?? think about it
         for layer_idx, reg in train_regs:
             reg_key = jax.random.fold_in(key, layer_idx) if key is not None else None
             E = E + reg.apply(mod_vals[layer_idx], key=reg_key, labels=labels)

@@ -52,7 +52,6 @@ plot = [
   "plotly",
   "scikit-learn",
   "seaborn",
-  "pygame"
 ]
 # Mac w/ Apple Silicon
 mps = [
