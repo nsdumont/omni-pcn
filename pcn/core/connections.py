@@ -516,6 +516,8 @@ class Predict:
         precision_parameterization=_DEFAULT,
         precision_input_norm: bool = False,
         precision_input=None,
+        precision_clip_min: float = 0.0,
+        precision_clip_max: float = 0.0,
         error_activation=_DEFAULT,
         alpha=_DEFAULT,
         n_bands: int = 0,
@@ -592,6 +594,16 @@ class Predict:
         # signal from a magnitude-collapsed latent without destabilising the
         # forward dynamics (exp-multimodal-alphanum-gen-05 phase 3).
         self.precision_input_norm = bool(precision_input_norm)
+
+        # Optional hard clamp on the post-activation precision (bounded log-
+        # precision). ``precision_clip_max > 0`` enables clamping to
+        # ``[precision_clip_min, precision_clip_max]`` — see PredictConnSpec.
+        self.precision_clip_min = float(precision_clip_min)
+        self.precision_clip_max = float(precision_clip_max)
+        if self.precision_clip_max and self.precision_clip_max <= self.precision_clip_min:
+            raise ValueError(
+                f"precision_clip_max ({self.precision_clip_max}) must exceed "
+                f"precision_clip_min ({self.precision_clip_min}) when > 0")
 
         # Precision activation: new ``precision_activation`` kwarg supersedes
         # the legacy ``precision_parameterization``. If neither is provided,

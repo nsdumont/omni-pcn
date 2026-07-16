@@ -544,6 +544,8 @@ class PCNetwork:
                 post_slice=conn.post_slice if conn.post_slice is not None else (),
                 precision_activation_type=getattr(conn, 'precision_activation_type',
                                                    getattr(conn, 'precision_param_type', 9)),
+                precision_clip_min=getattr(conn, 'precision_clip_min', 0.0),
+                precision_clip_max=getattr(conn, 'precision_clip_max', 0.0),
                 unit_precision=_is_unit_precision(conn),
                 error_activation_type=getattr(conn, 'error_activation_type', 0),
                 post_activation_type=getattr(conn, 'post_activation_type_id', 0),

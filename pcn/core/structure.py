@@ -200,6 +200,19 @@ class PredictConnSpec(NamedTuple):
     # ``linear`` / ``exp`` / ``softplus`` are the recommended choices because
     # they admit a closed-form inverse for bias initialisation.
     precision_activation_type: int = 9
+    # Optional hard bound on the (post-activation) precision. When
+    # ``precision_clip_max > 0`` the precision is clamped to
+    # ``[precision_clip_min, precision_clip_max]`` after the activation — a
+    # bounded-log-precision guard. Learned/input-conditioned precision on a
+    # generative edge otherwise runs away under the energy's ``-log precision``
+    # pull (which favours ever-higher precision as the prediction error shrinks),
+    # eventually slaving the predicted node to the top-down prediction. Clamping
+    # keeps precision in a band around the weak operating point so the modulation
+    # stays a relative reweighting. ``0`` (default) disables the clamp — the
+    # historical path is bit-identical. The clip has zero gradient outside the
+    # band, so it also stops the parameters from being driven past it.
+    precision_clip_min: float = 0.0
+    precision_clip_max: float = 0.0
     # Static optimisation flag: True when this connection's precision is
     # provably the constant 1.0 (precision not learned, init_precision == 1,
     # standard stateless precision activation, no precision-targeting routing).
@@ -361,8 +374,12 @@ class PredictConnSpec(NamedTuple):
 
     def precision_transform(self, log_prec):
         """Map raw precision parameters to a positive precision via the
-        configured activation function (selected by ``precision_activation_type``)."""
-        return ACTIVATIONS[self.precision_activation_type](log_prec)
+        configured activation function (selected by ``precision_activation_type``),
+        optionally clamped to ``[precision_clip_min, precision_clip_max]``."""
+        prec = ACTIVATIONS[self.precision_activation_type](log_prec)
+        if self.precision_clip_max > 0.0:
+            prec = jnp.clip(prec, self.precision_clip_min, self.precision_clip_max)
+        return prec
 
     def error_transform(self, residual):
         """Apply the configured error activation to a raw residual.
