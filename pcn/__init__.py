@@ -53,6 +53,11 @@ from .core.layer import Layer, NodeRef
 from .core.connections import Predict, PredictRes, PredictConv, PredictConvPool, PredictTransConv, Project, Modulate
 from .core.skip import Skip
 from .core.memory import Memory
+from .core.sensory import (
+    SensoryTransform, Sequential, SensoryInput, VisualInput, AuditoryInput,
+    DoGCenterSurround, DivisiveNormalization, GaborBank, ComplexEnergy,
+    MelPower, PowerCompression, LateralInhibition, LeakyIntegrator, STRFBank,
+)
 from .core.activations import (
     Activation, Direct, Relu, Softmax, Tanh, HardTanh, Sigmoid, LeakyRelu, Gelu, Elu,
     LayerNorm, NWTA, Poisson, MemoryActivation, Leaky, StochasticActivation, Stochastic,
@@ -93,6 +98,21 @@ __all__ = [
     'Modulate',
     'Skip',
     'Memory',
+    # Sensory front-ends
+    'SensoryTransform',
+    'Sequential',
+    'SensoryInput',
+    'VisualInput',
+    'AuditoryInput',
+    'DoGCenterSurround',
+    'DivisiveNormalization',
+    'GaborBank',
+    'ComplexEnergy',
+    'MelPower',
+    'PowerCompression',
+    'LateralInhibition',
+    'LeakyIntegrator',
+    'STRFBank',
     # Activations
     'Activation',
     'Direct',

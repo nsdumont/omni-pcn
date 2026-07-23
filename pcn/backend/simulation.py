@@ -442,7 +442,7 @@ def _combined_step(
     reward_fns: tuple = (),
     loss_fns: tuple = (),
     loss_fn_sample_arrays: dict = {},
-    spatial_layers: tuple = (),
+    spatial_layers: tuple = (), #TODO: no longer used
     spatial_neighborhoods: tuple = (),
     inference_regs: tuple = (),
     train_regs: tuple = (),

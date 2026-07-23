@@ -189,6 +189,86 @@ class Simulation:
 
         return tuple(converted.items())
 
+    def _apply_sensory_transforms(self, sample, data_map_tuple):
+        """Apply fixed ``SensoryInput`` feature transforms to a batch, *outside*
+        inference.
+
+        For each ``data_map`` entry whose layer is a :class:`SensoryInput`,
+        compute the transformed features once (``layer.encode``) and retarget the
+        clamp to a derived sample key. The raw data stays in ``sample`` under its
+        original key (and in the caller's ``raw_sample``) so record functions can
+        still read it. ``run_batch`` is unchanged — it just clamps the layer value
+        to the derived feature key.
+
+        Temporal data is supported: a 3-D raw array ``(B, T, raw_dim)`` (the
+        temporal-clamp convention ``run_batch`` reads) is encoded across all
+        timesteps in one vectorized call, giving ``(B, T, feat_dim)``.
+
+        A sensory input may be given either a full-clamp ``'key'`` value or a
+        ``(data_key, mask_key)`` **soft-clamp** value. The mask is a clamp-space
+        strength (applied to the feature clamp, NOT to the data): a scalar or a
+        per-sample / per-timestep array that is broadcast to the feature clamp
+        shape, so the feature layer is nudged toward ``encode(data)`` at strength
+        ``β`` (``v = β·features + (1−β)·v_inf``). It is not derived from a
+        data-shaped mask.
+
+        Returns ``(sample, patched_data_map_tuple)``. When no ``SensoryInput`` is
+        present both are returned unchanged.
+        """
+        from .core.sensory.base import SensoryInput
+        layers = self.net._layers
+        patched = []
+        out_sample = sample
+        copied = False
+        for key, value in data_map_tuple:
+            layer = (layers[key]
+                     if isinstance(key, int) and 0 <= key < len(layers) else None)
+            if isinstance(layer, SensoryInput):
+                if not copied:
+                    out_sample = dict(sample)
+                    copied = True
+                data_key = value if isinstance(value, str) else value[0]
+                feat = self._encode_sensory(layer, sample[data_key])
+                feat_key = f"__sensory_feat_{key}"
+                out_sample[feat_key] = feat
+                if isinstance(value, str):
+                    patched.append((key, feat_key))
+                else:
+                    mask_key_new = f"__sensory_mask_{key}"
+                    out_sample[mask_key_new] = self._broadcast_clamp_mask(
+                        jnp.asarray(sample[value[1]]), feat.shape)
+                    patched.append((key, (feat_key, mask_key_new)))
+            else:
+                patched.append((key, value))
+        return out_sample, tuple(patched)
+
+    @staticmethod
+    def _encode_sensory(layer, data):
+        """Encode a (possibly temporal) raw batch to flattened features.
+
+        Static ``(B, raw_dim)`` -> ``(B, feat_dim)``; temporal ``(B, T, raw_dim)``
+        -> ``(B, T, feat_dim)`` via a single vectorized encode over ``B*T``.
+        """
+        data = jnp.asarray(data)
+        if data.ndim == 3:                                    # (B, T, raw_dim)
+            b, t = data.shape[0], data.shape[1]
+            feat = layer.encode(data.reshape(b * t, data.shape[2]))
+            return feat.reshape(b, t, feat.shape[-1])
+        return layer.encode(data)                             # (B, raw_dim)
+
+    @staticmethod
+    def _broadcast_clamp_mask(mask, feat_shape):
+        """Broadcast a clamp-strength mask to the feature clamp shape.
+
+        ``mask`` may be a scalar, a leading-dims array (e.g. ``(B,)`` /
+        ``(B, T)``), or already the full feature shape; a trailing feature axis is
+        added as needed. No reduction of a data-shaped mask is performed.
+        """
+        mask = jnp.asarray(mask, dtype=jnp.float32)
+        if 0 < mask.ndim < len(feat_shape):
+            mask = mask.reshape(mask.shape + (1,) * (len(feat_shape) - mask.ndim))
+        return jnp.broadcast_to(mask, feat_shape)
+
     def _convert_record_map(self, record_map):
         """Convert a user-defined record_map into a list of (name, resolved_key, fn) triples.
 
@@ -414,6 +494,10 @@ class Simulation:
                 # may be deleted by donation aliasing after run_batch.
                 raw_sample = sample
                 sample = {k: jnp.array(v) for k, v in sample.items()}
+                # Fixed sensory front-ends: transform raw data -> features once,
+                # outside inference (no-op when no SensoryInput is used).
+                sample, batch_data_map = self._apply_sensory_transforms(
+                    sample, data_map_tuple)
 
                 # Run batch through consolidated function
                 if needs_rng:
@@ -424,7 +508,7 @@ class Simulation:
                 self.params, self._params_opt_state, new_values_opt_state, values_log, errors_log, precisions_log, deltas_log, energies = run_batch(
                     sample, self.params,
                     self.net.structure,
-                    data_map_tuple, iterations_per_sample,
+                    batch_data_map, iterations_per_sample,
                     log_every, learning=True,
                     n_learning_iterations=learning_iterations_per_sample,
                     reward_fns=getattr(self.net, '_reward_fns', ()),
@@ -584,6 +668,10 @@ class Simulation:
             # Always copy (run_batch donates its inputs; see train()).
             raw_sample = sample
             sample = {k: jnp.array(v) for k, v in sample.items()}
+            # Fixed sensory front-ends: transform raw data -> features once,
+            # outside inference (no-op when no SensoryInput is used).
+            sample, batch_data_map = self._apply_sensory_transforms(
+                sample, data_map_tuple)
 
             if needs_rng:
                 self._rng_key, batch_key = jax.random.split(self._rng_key)
@@ -592,7 +680,7 @@ class Simulation:
             self.params, _, _, values_log, errors_log, precisions_log, deltas_log, energies = run_batch(
                 sample, self.params,
                 self.net.structure,
-                data_map_tuple, iterations_per_sample,
+                batch_data_map, iterations_per_sample,
                 log_every, learning=False,
                 n_learning_iterations=0,
                 convergence_threshold=convergence_threshold,
