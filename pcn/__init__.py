@@ -51,11 +51,12 @@ __version__ = "0.1.0"
 from .core.network import PCNetwork
 from .core.layer import Layer, NodeRef
 from .core.connections import Predict, PredictRes, PredictConv, PredictConvPool, PredictTransConv, Project, Modulate
-from .core.skip import Skip
 from .core.memory import Memory
 from .core.sensory import (
     SensoryTransform, Sequential, SensoryInput, VisualInput, AuditoryInput,
     DoGCenterSurround, DivisiveNormalization, GaborBank, ComplexEnergy,
+    ColorOpponent, GaussianBlur, SpatialPool, ChannelStandardize,
+    ChannelSelect, ParallelPathways,
     MelPower, PowerCompression, LateralInhibition, LeakyIntegrator, STRFBank,
 )
 from .core.activations import (
@@ -96,7 +97,6 @@ __all__ = [
     'PredictTransConv',
     'Project',
     'Modulate',
-    'Skip',
     'Memory',
     # Sensory front-ends
     'SensoryTransform',
@@ -108,6 +108,12 @@ __all__ = [
     'DivisiveNormalization',
     'GaborBank',
     'ComplexEnergy',
+    'ColorOpponent',
+    'GaussianBlur',
+    'SpatialPool',
+    'ChannelStandardize',
+    'ChannelSelect',
+    'ParallelPathways',
     'MelPower',
     'PowerCompression',
     'LateralInhibition',

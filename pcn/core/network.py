@@ -283,40 +283,6 @@ class PCNetwork:
         conn.post_layer_idx = conn.post.owner._idx
         self._modulate_conns.append(conn)
 
-    def _add_skip(self, pre: Layer, post: Layer, delay: int, skip_scale: float):
-        """Create auxiliary layers and Project connections for a Skip.
-
-        Builds a chain ``pre -> aux_1 -> ... -> aux_delay -> post`` using
-        fixed-weight identity Project connections scaled by *skip_scale*.
-
-        Returns:
-            (auxiliary_layers, project_conns) — lists of the created objects.
-        """
-        from .activations import Direct
-        from .learning_rules import NoLearning
-
-        dim = pre.dim
-
-        chain = [pre]
-        auxiliary_layers = []
-        for i in range(delay):
-            aux = Layer(dim=dim, activation=Direct(),
-                        label=f"skip_aux_{pre.label}_{post.label}_{i}")
-            auxiliary_layers.append(aux)
-            chain.append(aux)
-        chain.append(post)
-
-        project_conns = []
-        for i in range(delay + 1):
-            proj = Project(
-                chain[i].value, chain[i + 1].value,
-                update_rule=NoLearning(),
-                init_weight=skip_scale * jnp.eye(chain[i].dim),
-            )
-            project_conns.append(proj)
-
-        return auxiliary_layers, project_conns
-
     def build(self, weight_initialization='xavier') -> 'PCNetwork':
         """
         Compile the network into JAX-friendly structures.
@@ -555,6 +521,8 @@ class PCNetwork:
                 precision_input_idx=pin_idx,
                 precision_input_node_types=pin_ntypes,
                 precision_input_slices=pin_slices,
+                delay=int(getattr(conn, 'delay', 0)),
+                delay_unit_ts=(getattr(conn, 'delay_unit', 'iteration') == 'timestep'),
             )
 
         predict_specs = tuple(
@@ -620,6 +588,9 @@ class PCNetwork:
                 has_bias=getattr(conn, 'use_bias', False),
                 post_activation_type=getattr(conn, 'post_activation_type_id', 0),
                 is_masked=getattr(conn, 'is_masked', False),
+                advance_timestep=(getattr(conn, 'advance', 'iteration') == 'timestep'),
+                delay=int(getattr(conn, 'delay', 0)),
+                delay_unit_ts=(getattr(conn, 'delay_unit', 'iteration') == 'timestep'),
             )
             for conn in self._project_conns
         )
@@ -652,9 +623,42 @@ class PCNetwork:
                 has_bias=getattr(conn, 'use_bias', False),
                 post_activation_type=getattr(conn, 'post_activation_type_id', 0),
                 is_masked=getattr(conn, 'is_masked', False),
+                advance_timestep=(getattr(conn, 'advance', 'iteration') == 'timestep'),
+                delay=int(getattr(conn, 'delay', 0)),
+                delay_unit_ts=(getattr(conn, 'delay_unit', 'iteration') == 'timestep'),
             )
             for conn in self._modulate_conns
         )
+
+        # ---- Delay history buffers (Phase 1: value pre nodes only) ----
+        # Scan every delayed conn and collect the required ring buffers, keyed
+        # by (pre_node_id, delay_unit_ts). Two conns reading the same node at
+        # different units get SEPARATE buffers (per-unit rings). Each buffer's
+        # depth is the max delay of any conn reading that (node, unit).
+        _buf_depth: dict = {}
+        for _spec in predict_specs + project_specs + modulate_specs:
+            if _spec.delay >= 1:
+                for _pre in _spec.pre_idx:
+                    _bk = (_pre, _spec.delay_unit_ts)
+                    _buf_depth[_bk] = max(_buf_depth.get(_bk, 0), _spec.delay)
+        # Deterministic buffer ordering (by node id, then unit).
+        _buf_keys = sorted(_buf_depth.keys())
+        _buf_index = {bk: k for k, bk in enumerate(_buf_keys)}
+        hist_specs = tuple((bk[0], _buf_depth[bk]) for bk in _buf_keys)
+        hist_unit_ts = tuple(bk[1] for bk in _buf_keys)
+        # Phase-1 value buffers are all node_type 0 (node_id = layer index).
+        hist_node_types = tuple(0 for _ in _buf_keys)
+
+        def _with_buffers(spec):
+            if spec.delay >= 1:
+                pbi = tuple(_buf_index[(pre, spec.delay_unit_ts)]
+                            for pre in spec.pre_idx)
+                return spec._replace(pre_buffer_indices=pbi)
+            return spec
+
+        predict_specs = tuple(_with_buffers(s) for s in predict_specs)
+        project_specs = tuple(_with_buffers(s) for s in project_specs)
+        modulate_specs = tuple(_with_buffers(s) for s in modulate_specs)
 
         # Pre-sort Project/Modulate by target type for efficient dispatch
         project_conns_internal = tuple(
@@ -736,6 +740,50 @@ class PCNetwork:
             for spec in predict_specs
         ) if predict_specs else ()
 
+        # ---- Phase 2: error/precision one-step carry buffers ----
+        # The former dedicated ``prev_errors`` / ``prev_precisions`` carries are
+        # folded into ``hist`` as depth-1, unit='iteration' buffers. Sizing is
+        # COARSE per node-type (deliberate risk reduction): if ANYTHING reads a
+        # carried error we build a buffer for EVERY error node, likewise for
+        # precisions; nets that read neither drop them entirely (bit-identical
+        # to the old ``() -> None`` prev path). Detection is a safe SUPERSET of
+        # the true consumers — false positives only build unread buffers.
+        _err_mem = any(
+            getattr(getattr(c, 'error_activation', None), 'has_memory', False)
+            for c in self._predict_conns)
+        _prec_mem = any(
+            getattr(getattr(c, 'precision_activation', None), 'has_memory', False)
+            for c in self._predict_conns)
+        _all_pm_specs = project_specs + modulate_specs
+        _err_pre = any(getattr(s, 'pre_node_type', 0) == 1 for s in _all_pm_specs)
+        _prec_pre = any(getattr(s, 'pre_node_type', 0) == 2 for s in _all_pm_specs)
+        _err_target = bool(project_conns_internal or modulate_conns_internal)
+        _prec_target = bool(project_conns_precision or modulate_conns_precision)
+        _err_flow = any(
+            getattr(s, 'pre_node_type', 0) == 1
+            for _, s in (modulate_conns_flow_pre + modulate_conns_flow_post))
+        _pin_err = any(
+            1 in s.precision_input_node_types
+            for s in predict_specs if s.precision_input_node_types)
+        _pin_prec = any(
+            2 in s.precision_input_node_types
+            for s in predict_specs if s.precision_input_node_types)
+        errors_consumed = (
+            _err_mem or _err_pre or _err_target or _err_flow or _pin_err)
+        precisions_consumed = (
+            _prec_mem or _prec_pre or _prec_target or _pin_prec)
+
+        _n_predict = len(predict_specs)
+        if errors_consumed:
+            # node_id = predict-conn index; depth 1; unit 'iteration' (False).
+            hist_specs = hist_specs + tuple((ci, 1) for ci in range(_n_predict))
+            hist_unit_ts = hist_unit_ts + tuple(False for _ in range(_n_predict))
+            hist_node_types = hist_node_types + tuple(1 for _ in range(_n_predict))
+        if precisions_consumed:
+            hist_specs = hist_specs + tuple((ci, 1) for ci in range(_n_predict))
+            hist_unit_ts = hist_unit_ts + tuple(False for _ in range(_n_predict))
+            hist_node_types = hist_node_types + tuple(2 for _ in range(_n_predict))
+
         return NetworkStructure(
             layers=layer_specs,
             predict_conns=predict_specs,
@@ -760,6 +808,9 @@ class PCNetwork:
             predict_has_flow_gates=predict_has_flow_gates,
             structural_attention_groups=tuple(self._structural_attention_groups),
             predict_pre_scales=predict_pre_scales,
+            hist_specs=hist_specs,
+            hist_unit_ts=hist_unit_ts,
+            hist_node_types=hist_node_types,
         )
 
     @staticmethod

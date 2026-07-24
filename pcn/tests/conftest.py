@@ -48,7 +48,7 @@ def complex_network():
         p2 = pcn.Predict(l3, l2)
         pcn.Predict(l4, l3)
 
-        # Skip connection (Project)
+        # Lateral shortcut (Project)
         pcn.Project(
             l4.value, l2.value,
             update_rule=pcn.Hebbian(learning_rate=1e-4)

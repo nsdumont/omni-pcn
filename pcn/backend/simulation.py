@@ -169,6 +169,42 @@ def _write_multiplicative(arr, modulation, post_slice):
 
 
 # ============================================================================
+# Temporal-delay history buffers (Phase 1: value pre nodes)
+# ============================================================================
+
+def _read_delayed(hist, buf_idx, delay, unit_ts, tick_base, i, ipt):
+    """Read a value ``delay`` steps back from its history ring buffer.
+
+    ``tick_base + i`` is the global iteration index (``tick_base`` offsets the
+    learning loop by ``n_iterations``). For sliding buffers the tick is the
+    iteration; for latched ('timestep') buffers it is the frame ``//ipt``.
+    Returns ``hist[buf_idx][(tick - delay) % S]`` — a plain array index, hence
+    automatically a constant w.r.t. ``value_and_grad(values)`` (the
+    one-directional property, no ``stop_gradient`` needed). Slots not yet
+    written hold the pre-fill zeros.
+    """
+    tick = (tick_base + i) if not unit_ts else (tick_base + i) // ipt
+    S = hist[buf_idx].shape[0]
+    return hist[buf_idx][(tick - delay) % S]
+
+
+def _delayed_srcs(conn, hist, tick_base, iter_idx, ipt):
+    """Delayed pre values for ``conn`` (parallel to ``conn.pre_idx``), or None.
+
+    Returns None on the static ``delay == 0`` path so the caller's ``get_pre``
+    takes the historical live-read branch (bit-identical). Only built when the
+    conn statically asks for a delay.
+    """
+    if conn.delay == 0:
+        return None
+    return [
+        _read_delayed(hist, conn.pre_buffer_indices[k], conn.delay,
+                      conn.delay_unit_ts, tick_base, iter_idx, ipt)
+        for k in range(len(conn.pre_idx))
+    ]
+
+
+# ============================================================================
 # Project / Modulate helpers
 # ============================================================================
 
@@ -180,17 +216,24 @@ def _apply_project_modulate_internal(
     precisions=(),
     project_biases=(),
     modulate_biases=(),
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
 ):
     """Apply Project (additive) then Modulate (multiplicative) to errors.
 
     Uses stop_gradient on pre_act so value dynamics don't see routing paths.
     Weights are passed as-is — caller is responsible for stop_gradient on
     weights (allowing GD connections to have live weights for gradient flow).
+
+    ``hist``/``tick_base``/``iter_idx``/``iters_per_timestep`` carry the delay
+    buffers; a value-pre conn with ``delay>=1`` reads its pre from ``hist``.
+    Defaults leave every delay==0 conn on the live-read path (bit-identical).
     """
     new_errors = list(errors)
 
     for weight_idx, conn in project_conns_internal:
-        pre_act = conn.get_pre(values, errors, activation_fns, precisions=precisions)
+        dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
+        pre_act = conn.get_pre(values, errors, activation_fns,
+                               precisions=precisions, delayed_srcs=dsrc)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
         contribution = conn.apply(
             jax.lax.stop_gradient(pre_act),
@@ -199,7 +242,9 @@ def _apply_project_modulate_internal(
             new_errors[conn.post_idx], contribution, conn.post_slice)
 
     for weight_idx, conn in modulate_conns_internal:
-        pre_act = conn.get_pre(values, tuple(new_errors), activation_fns, precisions=precisions)
+        dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
+        pre_act = conn.get_pre(values, tuple(new_errors), activation_fns,
+                               precisions=precisions, delayed_srcs=dsrc)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
         modulation = conn.apply(
             jax.lax.stop_gradient(pre_act),
@@ -251,6 +296,8 @@ def _apply_project_modulate_values(
     project_biases=(),
     modulate_biases=(),
     read_values=None,
+    is_boundary=None,
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
 ):
     """Apply Project (additive) then Modulate (multiplicative) targeting values.
 
@@ -269,26 +316,53 @@ def _apply_project_modulate_values(
 
     ``errors`` is the frozen carried error state (read by error->value routing).
     Respects clamping (soft blend against the write-target).
+
+    **``advance='timestep'`` gating.** ``is_boundary`` is a traced scalar that is
+    truthy on the first inference iteration of each input timestep
+    (``i % iters_per_timestep == 0``). Connections whose spec has
+    ``advance_timestep=True`` only fire there: off boundary an additive Project
+    contributes exactly 0 and a multiplicative Modulate factor is replaced by
+    the identity (1.0), so the target passes through untouched. Because ``i`` is
+    a tracer inside ``lax.fori_loop`` the gate is applied arithmetically, never
+    via a Python ``if``. ``is_boundary=None`` means "always fire" and takes the
+    original, un-gated code path verbatim (bit-identical numerics, no extra ops)
+    — callers should pass ``None`` whenever no value conn is gated.
+
+    Note: ``_single_pass`` deliberately does NOT gate — the feedforward seed is
+    a forward seed, not a timestep update, so value Project/Modulate always run
+    there regardless of ``advance``.
     """
     new_values = list(values)
     original_values = values  # for re-clamping
     read_src = tuple(values) if read_values is None else tuple(read_values)
 
+    gate_bool = None
+    if is_boundary is not None:
+        _b = jnp.asarray(is_boundary)
+        gate_bool = _b if _b.dtype == jnp.bool_ else (_b != 0)
+
     for weight_idx, conn in project_conns_value:
-        pre_act = conn.get_pre(read_src, errors, activation_fns)
+        dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
+        pre_act = conn.get_pre(read_src, errors, activation_fns, delayed_srcs=dsrc)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
+        contribution = conn.apply(pre_act, project_weights[weight_idx]) + p_bias
+        if gate_bool is not None and getattr(conn, 'advance_timestep', False):
+            # Off boundary the additive contribution is zeroed out.
+            contribution = contribution * gate_bool.astype(contribution.dtype)
         new_values[conn.post_idx] = _write_additive(
-            new_values[conn.post_idx],
-            conn.apply(pre_act, project_weights[weight_idx]) + p_bias,
-            conn.post_slice)
+            new_values[conn.post_idx], contribution, conn.post_slice)
 
     for weight_idx, conn in modulate_conns_value:
-        pre_act = conn.get_pre(read_src, errors, activation_fns)
+        dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
+        pre_act = conn.get_pre(read_src, errors, activation_fns, delayed_srcs=dsrc)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
+        modulation = conn.apply(pre_act, modulate_weights[weight_idx]) + bias
+        if gate_bool is not None and getattr(conn, 'advance_timestep', False):
+            # Off boundary the factor must be the IDENTITY, not zero.
+            modulation = jnp.where(gate_bool, modulation,
+                                   jnp.ones_like(modulation))
         new_values[conn.post_idx] = _write_multiplicative(
-            new_values[conn.post_idx],
-            conn.apply(pre_act, modulate_weights[weight_idx]) + bias,
-            conn.post_slice)
+            new_values[conn.post_idx], modulation, conn.post_slice)
 
     # Re-apply clamping (soft blend)
     return tuple(
@@ -375,19 +449,26 @@ def _apply_project_modulate_precision(
     activation_fns,
     project_biases=(),
     modulate_biases=(),
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
 ):
     """Apply Project (additive) then Modulate (multiplicative) to precisions.
 
     Uses stop_gradient on pre_act for locality, same as error-targeting.
     Returns unmodified precisions if no precision-targeting connections exist.
+
+    ``hist``/``tick_base``/``iter_idx``/``iters_per_timestep`` carry the delay
+    buffers; a value-pre conn with ``delay>=1`` reads its pre delayed. Defaults
+    keep every delay==0 conn on the live-read path (bit-identical).
     """
     if not project_conns_precision and not modulate_conns_precision:
         return precisions
     new_precisions = list(precisions)
 
     for weight_idx, conn in project_conns_precision:
+        dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
         pre_act = conn.get_pre(
-            values, errors, activation_fns, precisions=tuple(new_precisions))
+            values, errors, activation_fns, precisions=tuple(new_precisions),
+            delayed_srcs=dsrc)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
         contribution = conn.apply(
             jax.lax.stop_gradient(pre_act),
@@ -396,8 +477,10 @@ def _apply_project_modulate_precision(
             new_precisions[conn.post_idx], contribution, conn.post_slice)
 
     for weight_idx, conn in modulate_conns_precision:
+        dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
         pre_act = conn.get_pre(
-            values, errors, activation_fns, precisions=tuple(new_precisions))
+            values, errors, activation_fns, precisions=tuple(new_precisions),
+            delayed_srcs=dsrc)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
         modulation = conn.apply(
             jax.lax.stop_gradient(pre_act),
@@ -478,6 +561,14 @@ def _combined_step(
     # Per-layer Activation instances. Stochastic (needs_key) entries inject
     # noise into the prediction pre-activation, keyed per layer from ``key``.
     layer_activations: tuple = (),
+    # Traced scalar, truthy on the first iteration of each input timestep.
+    # None => no value Project/Modulate is advance='timestep' gated.
+    is_boundary=None,
+    # Delay history buffers threaded from run_batch. hist=() disables the
+    # feature (delay==0 path is bit-identical). tick_base offsets the learning
+    # loop by n_iterations; iter_idx is the loop tracer; iters_per_timestep (ipt)
+    # scales latched reads.
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
 ) -> tuple:
     """Combined inference + learning step.
 
@@ -585,8 +676,9 @@ def _combined_step(
         all_e_pre = []   # split errors for per-leg gating
         all_e_post = []
         for i, conn in enumerate(predict_conns):
+            dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
             pre_act = conn.get_pre(mod_vals, (), activation_fns,
-                                   layer_activations, key)
+                                   layer_activations, key, delayed_srcs=dsrc)
 
             if conn.has_fixed_weights:
                 pw_i = jax.lax.stop_gradient(pw[i])
@@ -604,7 +696,7 @@ def _combined_step(
                 ppw_i = ppw[i] if _learn_ppw else jax.lax.stop_gradient(ppw[i])
                 ppb_i = ppb[i] if _learn_ppb else jax.lax.stop_gradient(ppb[i])
 
-            pre_value = conn.get_pre_value(mod_vals) if conn.is_res else None
+            pre_value = conn.get_pre_value(mod_vals, delayed_srcs=dsrc) if conn.is_res else None
             prediction = conn.prediction(pre_act, pw_i, pb_i, pre_value)
             # Precision input: pre_act by default; custom precision_input
             # sources read current values (live) / prev-iteration carries.
@@ -652,7 +744,9 @@ def _combined_step(
             project_conns_precision, modulate_conns_precision,
             activation_fns,
             project_biases=proj_b,
-            modulate_biases=mod_b)
+            modulate_biases=mod_b,
+            hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+            iters_per_timestep=iters_per_timestep)
 
         # 3. Apply error-targeting Project/Modulate
         mod_errors = _apply_project_modulate_internal(
@@ -662,7 +756,9 @@ def _combined_step(
             activation_fns,
             precisions=mod_precisions,
             project_biases=proj_b,
-            modulate_biases=mod_b)
+            modulate_biases=mod_b,
+            hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+            iters_per_timestep=iters_per_timestep)
 
         # 3b. Structural attention: softmax reweighting (Mechanism 3)
         if structural_attention_groups:
@@ -805,7 +901,9 @@ def _combined_step(
         project_conns_value, modulate_conns_value,
         activation_fns, clamped,
         project_biases=project_biases, modulate_biases=modulate_biases,
-        read_values=values)
+        read_values=values, is_boundary=is_boundary,
+        hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+        iters_per_timestep=iters_per_timestep)
 
     # Apply params optimizer
     if isinstance(params_optimizer, optax.GradientTransformationExtraArgs):
@@ -921,6 +1019,7 @@ def _recompute_errors_precisions(
     modulate_conns_precision: tuple = (),
     project_conns_internal: tuple = (),
     modulate_conns_internal: tuple = (),
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
 ):
     """Compute errors and precisions at the given values (forward pass only).
 
@@ -941,8 +1040,9 @@ def _recompute_errors_precisions(
     errors = []
     precisions = []
     for i, conn in enumerate(predict_conns):
-        pre_act = conn.get_pre(values, (), activation_fns)
-        pre_value = conn.get_pre_value(values) if conn.is_res else None
+        dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
+        pre_act = conn.get_pre(values, (), activation_fns, delayed_srcs=dsrc)
+        pre_value = conn.get_pre_value(values, delayed_srcs=dsrc) if conn.is_res else None
         prediction = conn.prediction(
             pre_act, predict_weights[i], predict_biases[i], pre_value)
         prec_in = conn.get_precision_input(
@@ -966,14 +1066,18 @@ def _recompute_errors_precisions(
         project_weights, modulate_weights,
         project_conns_precision, modulate_conns_precision,
         activation_fns,
-        project_biases=project_biases, modulate_biases=modulate_biases)
+        project_biases=project_biases, modulate_biases=modulate_biases,
+        hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+        iters_per_timestep=iters_per_timestep)
     errors = _apply_project_modulate_internal(
         tuple(errors), values,
         project_weights, modulate_weights,
         project_conns_internal, modulate_conns_internal,
         activation_fns,
         precisions=precisions,
-        project_biases=project_biases, modulate_biases=modulate_biases)
+        project_biases=project_biases, modulate_biases=modulate_biases,
+        hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+        iters_per_timestep=iters_per_timestep)
     return tuple(errors), tuple(precisions)
 
 
@@ -1016,6 +1120,12 @@ def _inference_step(
     predict_precision_activations: tuple = (),
     precisions: tuple = (),
     layer_activations: tuple = (),
+    # Traced scalar, truthy on the first iteration of each input timestep.
+    # None => no value Project/Modulate is advance='timestep' gated.
+    is_boundary=None,
+    # Delay history buffers threaded from run_batch. hist=() => delay==0 path
+    # (bit-identical). See _combined_step for the argument semantics.
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
 ) -> Tuple[tuple, tuple, tuple, jnp.ndarray, Any]:
     """
     Single inference step: compute energy-based value gradients and update values.
@@ -1070,9 +1180,10 @@ def _inference_step(
         all_e_pre = []
         all_e_post = []
         for i, conn in enumerate(predict_conns):
+            dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
             pre_act = conn.get_pre(mod_vals, (), activation_fns,
-                                   layer_activations, key)
-            pre_value = conn.get_pre_value(mod_vals) if conn.is_res else None
+                                   layer_activations, key, delayed_srcs=dsrc)
+            pre_value = conn.get_pre_value(mod_vals, delayed_srcs=dsrc) if conn.is_res else None
             prediction = conn.prediction(
                 pre_act, predict_weights[i], predict_biases[i], pre_value)
             prec_in = conn.get_precision_input(
@@ -1122,7 +1233,9 @@ def _inference_step(
             project_conns_precision, modulate_conns_precision,
             activation_fns,
             project_biases=project_biases,
-            modulate_biases=modulate_biases)
+            modulate_biases=modulate_biases,
+            hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+            iters_per_timestep=iters_per_timestep)
 
         # 3. Apply error-targeting Project/Modulate
         mod_errors = _apply_project_modulate_internal(
@@ -1132,7 +1245,9 @@ def _inference_step(
             activation_fns,
             precisions=mod_precisions,
             project_biases=project_biases,
-            modulate_biases=modulate_biases)
+            modulate_biases=modulate_biases,
+            hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+            iters_per_timestep=iters_per_timestep)
 
         # 3b. Structural attention (Mechanism 3)
         if structural_attention_groups:
@@ -1193,7 +1308,9 @@ def _inference_step(
         project_conns_value, modulate_conns_value,
         activation_fns, clamped,
         project_biases=project_biases, modulate_biases=modulate_biases,
-        read_values=values)
+        read_values=values, is_boundary=is_boundary,
+        hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+        iters_per_timestep=iters_per_timestep)
 
     return tuple(new_values), pre_errors, pre_precisions, energy_val, new_values_opt_state
 
@@ -1629,6 +1746,130 @@ def run_batch(
                 f"n_timesteps ({n_timesteps})")
     iters_per_timestep = max(total_iterations, 1) // n_timesteps
 
+    # advance='timestep' gating: only pay for the boundary indicator when at
+    # least one value-targeting Project/Modulate actually asked for it. This is
+    # a plain Python check over the static specs (trace time), so networks with
+    # no gated conn get `is_boundary=None` and the original, un-gated code path.
+    _has_ts_gated_value_pm = any(
+        getattr(s, 'advance_timestep', False)
+        for _, s in tuple(project_conns_value) + tuple(modulate_conns_value))
+
+    def _timestep_boundary(iter_idx):
+        """Traced bool: True on the first inference iteration of a timestep."""
+        if not _has_ts_gated_value_pm:
+            return None
+        return (iter_idx % iters_per_timestep) == 0
+
+    # Out-of-loop `_combined_step` calls (the `n_learning_iterations == 0`
+    # equilibrium step and the final precision update) run on `clamped_last`
+    # AFTER the sequence has been consumed, so they are not timestep
+    # boundaries: a gated conn must not advance there. `None` when nothing is
+    # gated, which keeps the original code path.
+    _not_a_boundary = jnp.bool_(False) if _has_ts_gated_value_pm else None
+
+    # ---- Delay + one-step-carry history buffers ----
+    # Phase 1: value pre nodes read at delay>=1 (node_type 0). One ring per
+    # (node, unit) read at delay>=1; entry k is (depth_k+1, B, dim).
+    # Phase 2: the former dedicated ``prev_errors`` / ``prev_precisions``
+    # one-step carries are folded in as depth-1, unit='iteration' buffers
+    # (node_type 1 = error, 2 = precision; node_id is the predict-conn index).
+    # Value buffers are written at the TOP of each body from the carry-in
+    # ``values``; error/precision buffers at the BOTTOM from the step's
+    # freshly-recomputed carry-out. Empty when nothing is delayed AND nothing
+    # reads a carried error/precision, so delay==0 / no-consumer nets stay
+    # bit-identical.
+    _hist_specs = structure.hist_specs
+    _hist_unit_ts = structure.hist_unit_ts
+    # Legacy/manual structures may omit node types -> Phase-1 all-value default.
+    _hist_node_types = structure.hist_node_types or tuple(0 for _ in _hist_specs)
+    _precision_dims = tuple(pb.shape[0] for pb in precision_biases)
+
+    def _hist_buf_dim(node_type, node_id):
+        if node_type == 0:
+            return layer_dims[node_id]
+        if node_type == 1:
+            return predict_error_dims[node_id]
+        return _precision_dims[node_id]
+
+    hist = tuple(
+        jnp.zeros((depth + 1, batch_size, _hist_buf_dim(nt, node_id)))
+        for (node_id, depth), nt in zip(_hist_specs, _hist_node_types)
+    )
+
+    # Per-predict-conn maps: error/precision node -> hist buffer index. Empty
+    # tuples when that node-type is not consumed (the dropped-carry path).
+    _n_predict = len(predict_conns)
+    errors_consumed = any(nt == 1 for nt in _hist_node_types)
+    precisions_consumed = any(nt == 2 for nt in _hist_node_types)
+    if errors_consumed:
+        _emap = {node_id: k for k, ((node_id, _d), nt)
+                 in enumerate(zip(_hist_specs, _hist_node_types)) if nt == 1}
+        err_buf_idx = tuple(_emap[i] for i in range(_n_predict))
+    else:
+        err_buf_idx = ()
+    if precisions_consumed:
+        _pmap = {node_id: k for k, ((node_id, _d), nt)
+                 in enumerate(zip(_hist_specs, _hist_node_types)) if nt == 2}
+        prec_buf_idx = tuple(_pmap[i] for i in range(_n_predict))
+    else:
+        prec_buf_idx = ()
+
+    def _write_hist(hist, values, global_iter):
+        """Advance the VALUE delay rings from the post-clamp carry-in ``values``.
+
+        Called at the TOP of each loop body (after temporal-clamp+dropout, before
+        the step). ``global_iter`` is ``tick_base + i``. Error/precision buffers
+        (node_type != 0) are skipped here — they are bottom-written by
+        ``_write_hist_ep`` from the recomputed carry-out. Static no-op when there
+        are no value buffers.
+        """
+        if not _hist_specs:
+            return hist
+        new = list(hist)
+        for k, (node_id, depth) in enumerate(_hist_specs):
+            if _hist_node_types[k] != 0:
+                continue  # error/precision buffer: bottom-write, not here
+            S = depth + 1
+            if _hist_unit_ts[k]:  # latched ('timestep'): push at frame boundary
+                tick = global_iter // iters_per_timestep
+                push = ((global_iter % iters_per_timestep) == 0) & (global_iter > 0)
+                slot = (tick - 1) % S
+                new[k] = jnp.where(
+                    push, hist[k].at[slot].set(values[node_id]), hist[k])
+            else:                 # sliding ('iteration'): write every iteration
+                new[k] = hist[k].at[global_iter % S].set(values[node_id])
+        return tuple(new)
+
+    def _reconstruct_ep(hist, buf_idx_map, tick_base, iter_idx):
+        """Reconstruct a per-conn (errors or precisions) tuple from ``hist`` at
+        delay 1 — the value the deleted one-step carry would have held at the top
+        of this iteration. Returns () when the node-type is dropped, so the
+        ``... if x else None`` guards downstream reproduce today's behaviour.
+        """
+        if not buf_idx_map:
+            return ()
+        return tuple(
+            _read_delayed(hist, buf_idx_map[i], 1, False,
+                          tick_base, iter_idx, iters_per_timestep)
+            for i in range(len(buf_idx_map)))
+
+    def _write_hist_ep(hist, err_arrays, prec_arrays, global_iter):
+        """Write the step's carry-out errors/precisions into their depth-1
+        iteration buffers at slot ``global_iter % S`` (S == 2). Bottom-of-body,
+        after the recompute/aux carry-out is known. Static no-op when neither
+        node-type is buffered.
+        """
+        if not err_buf_idx and not prec_buf_idx:
+            return hist
+        new = list(hist)
+        for i, bi in enumerate(err_buf_idx):
+            S = new[bi].shape[0]
+            new[bi] = new[bi].at[global_iter % S].set(err_arrays[i])
+        for i, bi in enumerate(prec_buf_idx):
+            S = new[bi].shape[0]
+            new[bi] = new[bi].at[global_iter % S].set(prec_arrays[i])
+        return tuple(new)
+
     # Clamp data
     temporal_clamp_list = [jnp.zeros((batch_size, n_timesteps, dim)) for dim in layer_dims]
     for entry in data_map:
@@ -1693,6 +1934,19 @@ def run_batch(
         modulate_conns_internal=modulate_conns_internal,
         precisions_carry=precisions_carry_init,
     )
+
+    # Phase 2 bootstrap: pre-fill the error/precision one-step buffers so
+    # iteration 0's delay-1 read (slot (0-1)%S == 1) returns the SAME seed the
+    # old dedicated carry used — the ``_single_pass`` output errors/precisions
+    # (post-routing; the g(bias) precision bootstrap is already baked in). Slot
+    # 0 stays zeros, overwritten by iteration 0's bottom write.
+    if err_buf_idx or prec_buf_idx:
+        _h = list(hist)
+        for _i, _bi in enumerate(err_buf_idx):
+            _h[_bi] = _h[_bi].at[(-1) % _h[_bi].shape[0]].set(errors[_i])
+        for _i, _bi in enumerate(prec_buf_idx):
+            _h[_bi] = _h[_bi].at[(-1) % _h[_bi].shape[0]].set(precisions[_i])
+        hist = tuple(_h)
 
     # Initialize values optimizer
     _values_optimizer = values_optimizer if values_optimizer is not None else optax.sgd(1.0)
@@ -1771,7 +2025,14 @@ def run_batch(
             if convergence_threshold > 0:
                 # Full inference body with convergence checking
                 def inference_body(i, carry):
-                    values, errors, precisions, energies_list, values_log, errors_log, precisions_log, deltas_log, converged, vos = carry
+                    # The convergence path keeps a full errors/precisions carry:
+                    # its freeze-on-converge (skip_step returns the operand
+                    # unchanged) must return the SAME pytree structure as
+                    # do_step's full recompute, so the depth-1 hist reconstruction
+                    # (which is () for dropped node-types) cannot stand in here.
+                    # The carry-out is still written into hist at the bottom so a
+                    # downstream learning/precision step reconstructs correctly.
+                    values, errors, precisions, energies_list, values_log, errors_log, precisions_log, deltas_log, converged, vos, hist = carry
 
                     t = i // iters_per_timestep
                     clamped_t = tuple(c[:, t, :] for c in clamped)
@@ -1787,10 +2048,13 @@ def run_batch(
                                   values[j] * _dropout_masks[j])
                         for j in range(n_layers)
                     )
+                    # Advance value delay rings from the post-clamp carry-in.
+                    hist = _write_hist(hist, values, i)
                     prev_t = jnp.maximum(i - 1, 0) // iters_per_timestep
                     converged = jnp.where((t != prev_t) & (i > 0), jnp.bool_(False), converged)
 
                     iter_key = jax.random.fold_in(key, i)
+                    is_boundary = _timestep_boundary(i)
 
                     def do_step(operand):
                         v, e, prec, vos = operand
@@ -1817,6 +2081,9 @@ def run_batch(
                             predict_precision_activations=predict_precision_activations,
                             precisions=prec,
                             layer_activations=_layer_acts,
+                            is_boundary=is_boundary,
+                            hist=hist, tick_base=0, iter_idx=i,
+                            iters_per_timestep=iters_per_timestep,
                         )
                         new_e, new_prec = _recompute_errors_precisions(
                             new_v, predict_conns, predict_weights, predict_biases,
@@ -1831,7 +2098,9 @@ def run_batch(
                             modulate_conns_precision=modulate_conns_precision,
                             project_conns_internal=project_conns_internal,
                             modulate_conns_internal=modulate_conns_internal,
-                            is_stochastic=is_stochastic, key=iter_key)
+                            is_stochastic=is_stochastic, key=iter_key,
+                            hist=hist, tick_base=0, iter_idx=i,
+                            iters_per_timestep=iters_per_timestep)
                         return new_v, new_e, new_prec, new_vos
 
                     def skip_step(operand):
@@ -1867,16 +2136,21 @@ def run_batch(
                         new_values, new_errors, new_precisions
                     )
                     converged = jnp.logical_or(converged, jnp.isnan(energies_list[-1]))
-                    return new_values, new_errors, new_precisions, energies_list, values_log, errors_log, precisions_log, deltas_log, converged, new_vos
+                    # Bottom write: mirror the full carry-out into the hist rings
+                    # (E[i+1]) so any following learning/precision step, which
+                    # reconstructs its prev from hist, stays consistent. No-op for
+                    # dropped node-types.
+                    hist = _write_hist_ep(hist, new_errors, new_precisions, i)
+                    return new_values, new_errors, new_precisions, energies_list, values_log, errors_log, precisions_log, deltas_log, converged, new_vos, hist
 
-                values, errors, precisions, energies, values_log, errors_log, precisions_log, deltas_log, _, _values_opt_state = lax.fori_loop(
+                values, errors, precisions, energies, values_log, errors_log, precisions_log, deltas_log, _, _values_opt_state, hist = lax.fori_loop(
                     0, n_iterations, inference_body,
-                    (values, errors, precisions, energies, values_log, errors_log, precisions_log, deltas_log, jnp.bool_(False), _values_opt_state)
+                    (values, errors, precisions, energies, values_log, errors_log, precisions_log, deltas_log, jnp.bool_(False), _values_opt_state, hist)
                 )
             else:
                 # Fast inference body: no convergence check, merged recompute+log via lax.cond
                 def inference_body_fast(i, carry):
-                    values, errors, precisions, energies_list, values_log, errors_log, precisions_log, deltas_log, vos = carry
+                    values, energies_list, values_log, errors_log, precisions_log, deltas_log, vos, hist = carry
 
                     t = i // iters_per_timestep
                     clamped_t = tuple(c[:, t, :] for c in clamped)
@@ -1889,8 +2163,14 @@ def run_batch(
                                   values[j] * _dropout_masks[j])
                         for j in range(n_layers)
                     )
+                    # Advance value delay rings from the post-clamp carry-in.
+                    hist = _write_hist(hist, values, i)
+                    # Reconstruct the one-step error/precision carries (E[i]/P[i]).
+                    errors = _reconstruct_ep(hist, err_buf_idx, 0, i)
+                    precisions = _reconstruct_ep(hist, prec_buf_idx, 0, i)
 
                     iter_key = jax.random.fold_in(key, i)
+                    is_boundary = _timestep_boundary(i)
 
                     new_values, pre_errors, pre_precisions, energy, new_vos = _inference_step(
                         values, errors, clamped_t,
@@ -1915,6 +2195,9 @@ def run_batch(
                         predict_precision_activations=predict_precision_activations,
                         precisions=precisions,
                         layer_activations=_layer_acts,
+                        is_boundary=is_boundary,
+                        hist=hist, tick_base=0, iter_idx=i,
+                        iters_per_timestep=iters_per_timestep,
                     )
 
                     # Re-apply dropout mask BEFORE logging so the log reflects
@@ -1941,7 +2224,9 @@ def run_batch(
                             modulate_conns_precision=modulate_conns_precision,
                             project_conns_internal=project_conns_internal,
                             modulate_conns_internal=modulate_conns_internal,
-                            is_stochastic=is_stochastic, key=iter_key)
+                            is_stochastic=is_stochastic, key=iter_key,
+                            hist=hist, tick_base=0, iter_idx=i,
+                            iters_per_timestep=iters_per_timestep)
                         energies_list, values_log, errors_log, precisions_log, deltas_log = _state_log(
                             i, energies_list, values_log, errors_log, precisions_log, deltas_log,
                             new_values, new_errors, new_precisions
@@ -1962,7 +2247,9 @@ def run_batch(
                                 modulate_conns_precision=modulate_conns_precision,
                                 project_conns_internal=project_conns_internal,
                                 modulate_conns_internal=modulate_conns_internal,
-                                is_stochastic=is_stochastic, key=iter_key)
+                                is_stochastic=is_stochastic, key=iter_key,
+                                hist=hist, tick_base=0, iter_idx=i,
+                                iters_per_timestep=iters_per_timestep)
                             energy = _compute_energy(ne, np_)
                             nd_ = _compute_deltas(ne, np_)
                             new_energies = energies_list.at[log_idx].set(energy)
@@ -1978,11 +2265,13 @@ def run_batch(
                         new_errors, new_precisions, energies_list, values_log, errors_log, precisions_log, deltas_log = lax.cond(
                             should_log, _do_recompute_and_log, _skip_all, None)
 
-                    return new_values, new_errors, new_precisions, energies_list, values_log, errors_log, precisions_log, deltas_log, new_vos
+                    # Bottom write: store the carry-out errors/precisions (E[i+1]).
+                    hist = _write_hist_ep(hist, new_errors, new_precisions, i)
+                    return new_values, energies_list, values_log, errors_log, precisions_log, deltas_log, new_vos, hist
 
-                values, errors, precisions, energies, values_log, errors_log, precisions_log, deltas_log, _values_opt_state = lax.fori_loop(
+                values, energies, values_log, errors_log, precisions_log, deltas_log, _values_opt_state, hist = lax.fori_loop(
                     0, n_iterations, inference_body_fast,
-                    (values, errors, precisions, energies, values_log, errors_log, precisions_log, deltas_log, _values_opt_state)
+                    (values, energies, values_log, errors_log, precisions_log, deltas_log, _values_opt_state, hist)
                 )
 
         # Resolve params optimizer
@@ -2007,6 +2296,10 @@ def run_batch(
             if n_learning_iterations == 0:
                 clamped_last = tuple(c[:, -1, :] for c in clamped)
                 learn_key = jax.random.fold_in(key, n_iterations)
+                # Equilibrium step after inference: reconstruct the one-step
+                # error/precision carries from the rings inference left behind.
+                errors = _reconstruct_ep(hist, err_buf_idx, n_iterations, 0)
+                precisions = _reconstruct_ep(hist, prec_buf_idx, n_iterations, 0)
                 (values, errors, precisions,
                  predict_weights, predict_biases,
                  project_weights, project_biases,
@@ -2027,6 +2320,7 @@ def run_batch(
                     reward_fns, loss_fns, loss_fn_sample_arrays,
                     spatial_layers, spatial_neighborhoods,
                     inference_regs, train_regs, learn_key, labels,
+                    is_boundary=_not_a_boundary,
                     project_conns_precision=project_conns_precision,
                     modulate_conns_precision=modulate_conns_precision,
                     modulate_conns_flow_pre=modulate_conns_flow_pre,
@@ -2042,6 +2336,10 @@ def run_batch(
                     prev_precisions=precisions,
                     layer_activations=_layer_acts,
                     is_stochastic=is_stochastic,
+                    # Equilibrium learning step after the sequence: read delayed
+                    # from the rings left by inference (no new write here).
+                    hist=hist, tick_base=n_iterations, iter_idx=0,
+                    iters_per_timestep=iters_per_timestep,
                 )
                 # errors/precisions are pre-update; not used after this point
             else:
@@ -2050,7 +2348,7 @@ def run_batch(
                 # feedback loop.  A single precision update happens after
                 # the loop via a final combined_step with update_precision=True.
                 def learning_body(i, carry):
-                    values, errors, precisions, energies_list, values_log, errors_log, precisions_log, deltas_log, pw, pb, prw, prb, mw, mb, ppw, ppb, params_opt_st, vos = carry
+                    values, energies_list, values_log, errors_log, precisions_log, deltas_log, pw, pb, prw, prb, mw, mb, ppw, ppb, params_opt_st, vos, hist = carry
 
                     t = (n_iterations + i) // iters_per_timestep
                     clamped_t = tuple(c[:, t, :] for c in clamped)
@@ -2063,8 +2361,14 @@ def run_batch(
                                   values[j] * _dropout_masks[j])
                         for j in range(n_layers)
                     )
+                    # Advance value delay rings; learning loop offsets by n_iterations.
+                    hist = _write_hist(hist, values, n_iterations + i)
+                    # Reconstruct the one-step error/precision carries.
+                    errors = _reconstruct_ep(hist, err_buf_idx, n_iterations, i)
+                    precisions = _reconstruct_ep(hist, prec_buf_idx, n_iterations, i)
 
                     learn_key = jax.random.fold_in(key, n_iterations + i)
+                    is_boundary = _timestep_boundary(n_iterations + i)
                     (values, pre_errors, pre_precisions,
                      pw, pb, prw, prb, mw, mb, ppw, ppb,
                      vos, params_opt_st) = _combined_step(
@@ -2095,6 +2399,9 @@ def run_batch(
                         predict_precision_activations=predict_precision_activations,
                         prev_precisions=precisions,
                         layer_activations=_layer_acts,
+                        is_boundary=is_boundary,
+                        hist=hist, tick_base=n_iterations, iter_idx=i,
+                        iters_per_timestep=iters_per_timestep,
                     )
 
                     # Re-apply dropout mask BEFORE logging.
@@ -2121,7 +2428,9 @@ def run_batch(
                             modulate_conns_precision=modulate_conns_precision,
                             project_conns_internal=project_conns_internal,
                             modulate_conns_internal=modulate_conns_internal,
-                            is_stochastic=is_stochastic, key=learn_key)
+                            is_stochastic=is_stochastic, key=learn_key,
+                            hist=hist, tick_base=n_iterations, iter_idx=i,
+                            iters_per_timestep=iters_per_timestep)
                         energies_list, values_log, errors_log, precisions_log, deltas_log = _state_log(
                             n_iterations + i, energies_list, values_log, errors_log, precisions_log, deltas_log,
                             values, errors, precisions
@@ -2145,7 +2454,9 @@ def run_batch(
                                 modulate_conns_precision=modulate_conns_precision,
                                 project_conns_internal=project_conns_internal,
                                 modulate_conns_internal=modulate_conns_internal,
-                                is_stochastic=is_stochastic, key=learn_key)
+                                is_stochastic=is_stochastic, key=learn_key,
+                                hist=hist, tick_base=n_iterations, iter_idx=i,
+                                iters_per_timestep=iters_per_timestep)
                             energy = _compute_energy(ne, np_, predict_pre_scales)
                             nd_ = _compute_deltas(ne, np_)
                             new_energies = energies_list.at[log_idx].set(energy)
@@ -2160,19 +2471,21 @@ def run_batch(
 
                         errors, precisions, energies_list, values_log, errors_log, precisions_log, deltas_log = lax.cond(
                             should_log, _do_recompute_and_log, _skip_all, None)
-                    return values, errors, precisions, energies_list, values_log, errors_log, precisions_log, deltas_log, pw, pb, prw, prb, mw, mb, ppw, ppb, params_opt_st, vos
+                    # Bottom write: store the carry-out errors/precisions.
+                    hist = _write_hist_ep(hist, errors, precisions, n_iterations + i)
+                    return values, energies_list, values_log, errors_log, precisions_log, deltas_log, pw, pb, prw, prb, mw, mb, ppw, ppb, params_opt_st, vos, hist
 
-                (values, errors, precisions, energies, values_log, errors_log, precisions_log, deltas_log,
+                (values, energies, values_log, errors_log, precisions_log, deltas_log,
                  predict_weights, predict_biases,
                  project_weights, project_biases,
                  modulate_weights, modulate_biases,
-                 precision_weights, precision_biases, new_params_opt_state, _values_opt_state) = lax.fori_loop(
+                 precision_weights, precision_biases, new_params_opt_state, _values_opt_state, hist) = lax.fori_loop(
                     0, n_learning_iterations, learning_body,
-                    (values, errors, precisions, energies, values_log, errors_log, precisions_log, deltas_log,
+                    (values, energies, values_log, errors_log, precisions_log, deltas_log,
                      predict_weights, predict_biases,
                      project_weights, project_biases,
                      modulate_weights, modulate_biases,
-                     precision_weights, precision_biases, new_params_opt_state, _values_opt_state)
+                     precision_weights, precision_biases, new_params_opt_state, _values_opt_state, hist)
                 )
 
                 # Final step: update precision with the converged values/weights.
@@ -2185,6 +2498,12 @@ def run_batch(
                     clamped_last = tuple(c[:, -1, :] for c in clamped)
                     prec_key = jax.random.fold_in(
                         key, n_iterations + n_learning_iterations)
+                    # Reconstruct the one-step carries from the rings the
+                    # learning loop left behind (tick_base past its last write).
+                    errors = _reconstruct_ep(
+                        hist, err_buf_idx, n_iterations + n_learning_iterations, 0)
+                    precisions = _reconstruct_ep(
+                        hist, prec_buf_idx, n_iterations + n_learning_iterations, 0)
                     (values, errors, precisions,
                      predict_weights, predict_biases,
                      project_weights, project_biases,
@@ -2205,6 +2524,7 @@ def run_batch(
                         reward_fns, loss_fns, loss_fn_sample_arrays,
                         spatial_layers, spatial_neighborhoods,
                         inference_regs, train_regs, prec_key, labels,
+                        is_boundary=_not_a_boundary,
                         update_precision=True,
                         is_stochastic=is_stochastic,
                         project_conns_precision=project_conns_precision,
@@ -2221,6 +2541,10 @@ def run_batch(
                         predict_precision_activations=predict_precision_activations,
                         prev_precisions=precisions,
                         layer_activations=_layer_acts,
+                        # Final precision step after the sequence: read delayed
+                        # from the rings left by the learning loop (no new write).
+                        hist=hist, tick_base=n_iterations + n_learning_iterations,
+                        iter_idx=0, iters_per_timestep=iters_per_timestep,
                     )
 
     new_params = NetworkParams(

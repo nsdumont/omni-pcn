@@ -17,7 +17,7 @@ PCN provides a flexible framework for building and training predictive coding ne
 - **Stateful & stochastic neurons**: `Leaky` activations (leaky-integrator errors/precisions) and `Stochastic` activations (noise injection for sampling/generative inference)
 - **Multiple Learning Rules**: Can have projections trained with Hebbian, Oja, three-factor Hebbian, or Gradient Descent learning with customizable reward/loss functions (non-PC trained connections alongside the PC ones)
 - **Learnable Precision**: Precision can be learned (softplus/exp/linear parameterizations), either as a single bias or as a function of other layer states
-- **Composite building blocks**: Reusable groups of layers + connections — `Skip` (delayed identity shortcuts) and `Memory` (Legendre/Laguerre Memory Unit for online history)
+- **Delayed connections & temporal PC**: any `Predict`/`Project`/`Modulate` can read its source at a `delay` (in iterations or timesteps) — the basis for temporal predictive coding — alongside the `Memory` (Legendre/Laguerre Memory Unit) composite for online history
 - **Optimizers**: Helper functions for multi-transform with optax to set layer and param-type specific optimizers
 - **JAX Backend**: GPU and Apple Silicon support
 
@@ -186,21 +186,60 @@ sim.train(seq_loader, data_map={l_in: 'seq'},                      # (batch, T, 
 ```
 
 
-### Composite building blocks: `Skip` and `Memory`
+### Delayed connections & temporal predictive coding
 
-Composites are reusable groups of layers and connections created inside the
-`with net:` block, just like a single connection.
+Any `Predict`, `Project`, or `Modulate` can read its source at a **delay**, so the
+prediction is formed from a *past* state instead of the current one:
 
-**`Skip`** — a delayed identity shortcut. Inserts `delay` auxiliary `Direct`
-layers chained by fixed-weight (`NoLearning`) identity `Project`s, so a copy of
-`pre` reaches `post` (same dim) `delay` timesteps later, scaled by `skip_scale`:
+- `delay=d, delay_unit='iteration'` — the source `d` inference iterations back
+  (a **sliding** window over the relaxation).
+- `delay=d, delay_unit='timestep'` — the source's converged value from `d` input
+  timesteps back (a **latched** snapshot, held constant across all the relaxation
+  iterations of the current timestep). This is the temporal-prior read.
+
+The delayed source is a constant of the current energy — no gradient flows back
+through it — so a delayed edge is a **one-directional** predictor, exactly the
+filtering (no backprop-through-time) assumption of temporal predictive coding. The
+history pre-fills with zeros, so the first `delay` steps read zeros. A delayed
+identity `Project(pre, post, delay=n, init_weight=I)` gives a plain delayed copy.
+
+**Temporal predictive coding (tPC).** A dynamical latent `z` that predicts both
+its own next value and the observation is just two `Predict` edges — a *transition*
+and an *observation*:
+
+```
+F = ½·Π_trans·‖z[t] − A·f(z[t−1])‖²  +  ½·Π_obs·‖x[t] − C·g(z[t])‖²
+```
 
 ```python
+net = pcn.PCNetwork(seed=0)
 with net:
-    l_a = pcn.Layer(dim=64, label="a")
-    l_b = pcn.Layer(dim=64, label="b")
-    pcn.Skip(l_a, l_b, delay=2, skip_scale=1.0)   # a -> aux1 -> aux2 -> b
+    x = pcn.Layer(dim=D_obs, activation=pcn.Direct(), label="obs")  # clamp (B, T, D_obs)
+    z = pcn.Layer(dim=D_lat, activation=pcn.Tanh(),   label="z")    # free latent
+
+    pcn.Predict(z, z, delay=1, delay_unit="timestep")   # transition: learns A
+    pcn.Predict(z, x)                                    # observation: learns C
+net.build()
+
+sim = pcn.Simulation(net)
+sim.train(seq_loader, data_map={x: "obs"},              # (B, T, D_obs) sequences
+          iterations_per_sample=K * T)                  # K relax steps / timestep
 ```
+
+The transition weight `A` and observation weight `C` are learned by the ordinary
+local PC weight rule — no special temporal machinery — and each edge's precision is
+its process / measurement noise weight (learnable via `learn_precision`). Use
+several relaxation iterations per timestep (`K ≈ 5–10`): the latent estimate is the
+*fixed point* of the per-timestep relaxation, so too few iterations under-solve it.
+On a linear-Gaussian system this recovers the analytic Kalman-style filter. The
+delayed self-edge holds `z[t−1]` as a frozen prior for the whole timestep, so no
+auxiliary "previous-state" layer or optimizer freezing is needed.
+
+
+### Composite building block: `Memory`
+
+The `Memory` composite is a reusable group of layers and connections created
+inside the `with net:` block, just like a single connection.
 
 **`Memory`** — a Legendre/Laguerre Memory Unit (LMU / HiPPO). It maintains an
 online polynomial projection of an input signal's recent history as a fixed
@@ -318,8 +357,7 @@ omnipcn/
 │   ├── core/                       # Network definition (OOP API)
 │   │   ├── network.py              # PCNetwork context manager
 │   │   ├── layer.py                # Layer, NodeRef
-│   │   ├── connections.py          # Predict, PredictRes, PredictConv, PredictTransConv, Project, Modulate
-│   │   ├── skip.py                 # Skip composite (delayed identity shortcuts)
+│   │   ├── connections.py          # Predict, PredictRes, PredictConv, PredictTransConv, Project, Modulate (all support delay=)
 │   │   ├── memory.py               # Memory (LMU / HiPPO) composite
 │   │   ├── activations.py          # Activation classes + ACTIVATION_REGISTRY
 │   │   ├── learning_rules.py       # Hebbian, Oja, ThreeFactorHebbian, GradientDescent, NoLearning

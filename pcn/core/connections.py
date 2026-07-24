@@ -402,6 +402,24 @@ def _precision_source_dim(ref: NodeRef) -> int:
 
 
 # ============================================================================
+# Delay validation (shared by Predict / Project / Modulate)
+# ============================================================================
+
+def _validate_delay(delay, delay_unit):
+    """Validate a connection ``delay`` / ``delay_unit`` pair.
+
+    ``delay`` must be a non-negative int (``bool`` rejected); ``delay_unit``
+    must be ``'iteration'`` or ``'timestep'``. Returns the delay as a plain int.
+    """
+    if isinstance(delay, bool) or not isinstance(delay, (int, np.integer)) or int(delay) < 0:
+        raise ValueError(f"delay must be a non-negative int, got {delay!r}")
+    if delay_unit not in ('iteration', 'timestep'):
+        raise ValueError(
+            f"delay_unit must be 'iteration' or 'timestep', got {delay_unit!r}")
+    return int(delay)
+
+
+# ============================================================================
 # Predict
 # ============================================================================
 
@@ -480,6 +498,26 @@ class Predict:
             acyclic — a connection may even read its own error
             (``p.precision_input = [p.error]`` assigned after construction;
             resolution happens at build time).
+        delay: Read the pre value(s) at a temporal delay instead of live.
+            ``0`` (default) is the standard behaviour — the pre is read live
+            inside the energy gradient and is bit-identical to a network built
+            without the delay machinery. ``delay=d >= 1`` reads the pre from a
+            per-node history ring buffer ``d`` steps back:
+
+            - ``delay_unit='iteration'`` (default) — **sliding**: pre is the
+              value ``d`` inference iterations ago; it advances every iteration.
+            - ``delay_unit='timestep'`` — **latched**: pre is the end-of-frame
+              snapshot from ``d`` input timesteps ago, held constant across all
+              ``iters_per_timestep`` iterations of the current frame (the
+              tPC/Kalman prior).
+
+            The delayed read is **one-directional**: the buffer is a carry
+            constant outside the value gradient, so no error flows back to the
+            delayed pre. The first ``delay`` reads return zeros (pre-fill). All
+            Predict pres are value nodes, so any ``delay`` is accepted.
+            ``delay_unit`` is ignored when ``delay == 0``.
+        delay_unit: ``'iteration'`` (sliding) or ``'timestep'`` (latched). See
+            ``delay``.
 
     Precision learning rate:
         Precision parameters are updated by the same optimizer as predict
@@ -528,10 +566,17 @@ class Predict:
         padding=None,
         weight_mask=None,
         stochastic: bool = True,
+        delay: int = 0,
+        delay_unit: str = 'iteration',
     ):
         from .network import _get_current_network
         net = _get_current_network()
         defaults = net._defaults
+
+        # Temporal-delay read (Phase 1: value pre nodes only). Predict pres are
+        # always layer values, so any non-negative delay is accepted here.
+        self.delay = _validate_delay(delay, delay_unit)
+        self.delay_unit = delay_unit
 
         # Normalize pre to list of Layers + parallel slice bounds
         self.pre, self.pre_slices = _normalize_pre_layers(pre)
@@ -732,7 +777,7 @@ class PredictRes(Predict):
     """
     Residual predictive coding connection.
 
-    Like Predict, but adds a skip connection: prediction = W @ f(pre.value) + pre.value
+    Like Predict, but adds a residual connection: prediction = W @ f(pre.value) + pre.value
 
     Requires pre.dim == post.dim (single pre only).
     """
@@ -837,10 +882,44 @@ class Project:
             ``(post_dim, pre_dim)``); optional for ``'conv'`` / ``'transconv'``
             (shape ``(out_channels, in_channels, kH, kW)``). Element-wise
             multiplied into ``W`` at init and after every weight update.
+        advance: When this connection fires during inference. Value-targeting
+            only.
+
+            - ``'iteration'`` (default): fires on every inference iteration,
+              the historical behavior.
+            - ``'timestep'``: fires only on the FIRST iteration of each input
+              timestep, i.e. once per input frame instead of once per
+              iteration. With a ``(B, T, dim)`` clamped input the loop maps
+              iterations to frames via
+              ``iters_per_timestep = total_iterations // n_timesteps``; the
+              connection fires when ``i % iters_per_timestep == 0``. This lets
+              a state operator advance once per frame while the latent relaxes
+              for ``iters_per_timestep`` iterations against a held frame. Off
+              boundary an additive ``Project`` contributes 0 and a
+              multiplicative ``Modulate`` factor becomes the identity (1.0).
+
+            ``advance='timestep'`` is rejected for error- or precision-targeting
+            connections: those nodes are re-derived fresh every iteration and do
+            not carry, so gating them has no meaning.
+        delay: Read the pre value(s) at a temporal delay instead of live.
+            ``0`` (default) is bit-identical to today. ``delay=d >= 1`` reads
+            the pre from a per-node history ring buffer ``d`` steps back;
+            ``delay_unit='iteration'`` slides (``d`` iterations back, advancing
+            every iteration) and ``delay_unit='timestep'`` latches (the
+            end-of-frame snapshot ``d`` timesteps back, held across the frame).
+            The read is one-directional (buffer is a carry constant) and the
+            first ``delay`` reads are zeros. Every pre node must be a value node;
+            ``delay >= 1`` on an error/precision pre raises ``NotImplementedError``.
+            A delayed identity ``Project(pre, post, delay=n, init_weight=I)`` gives
+            a plain delayed copy.
+        delay_unit: ``'iteration'`` (sliding) or ``'timestep'`` (latched). See
+            ``delay``. Ignored when ``delay == 0``.
 
     Example:
         Project(l4.value, l2.value, update_rule=Hebbian(learning_rate=1e-4))
         Project([l1, l2], l3.value)  # multi-pre, Layer input
+        Project(l.value, l.value, init_weight=-np.eye(d), advance='timestep')
+        Project(a.value, b.value, delay=2, init_weight=np.eye(d))  # delayed copy
     """
 
     def __init__(
@@ -859,7 +938,18 @@ class Project:
         stride=None,
         padding=None,
         weight_mask=None,
+        advance: str = 'iteration',
+        delay: int = 0,
+        delay_unit: str = 'iteration',
     ):
+        if advance not in ('iteration', 'timestep'):
+            raise ValueError(
+                "Project(advance=...) must be 'iteration' or 'timestep', "
+                f"got {advance!r}")
+        self.advance = advance
+        self.delay = _validate_delay(delay, delay_unit)
+        self.delay_unit = delay_unit
+
         from .network import _get_current_network
         net = _get_current_network()
         defaults = net._defaults
@@ -892,12 +982,26 @@ class Project:
                 "Flow nodes (flow_to_pre, flow_to_post) cannot be used as "
                 "pre source for Project connections")
 
+        # Phase 1 restriction: delay is only implemented for value pre nodes.
+        if self.delay >= 1 and any(p.node_type_id != 0 for p in self._pre_list):
+            raise NotImplementedError("delay on error/precision pres is Phase 2")
+
         # Validate: flow nodes cannot be post target for Project (use Modulate)
         post_type = self.post.node_type_id
         if post_type in (3, 4):
             raise ValueError(
                 "Flow nodes (flow_to_pre, flow_to_post) can only be targeted "
                 "by Modulate connections, not Project")
+
+        # Validate: advance='timestep' is only meaningful for value targets.
+        if advance == 'timestep' and post_type != 0:
+            raise ValueError(
+                "Project(advance='timestep') is only supported for "
+                "value-targeting connections (post is a layer value), got post "
+                f"node type {self.post.node_type!r}. Error- and "
+                "precision-targeting routing is re-derived fresh every "
+                "iteration and does not carry, so gating it to timestep "
+                "boundaries has no effect.")
 
         if update_rule is not None:
             self.update_rule = update_rule
@@ -977,6 +1081,33 @@ class Modulate:
             ``(post_dim, pre_dim)``); optional for ``'conv'`` / ``'transconv'``
             (shape ``(out_channels, in_channels, kH, kW)``). Element-wise
             multiplied into ``W`` at init and after every weight update.
+        advance: When this connection fires during inference. Value-targeting
+            only.
+
+            - ``'iteration'`` (default): fires on every inference iteration,
+              the historical behavior.
+            - ``'timestep'``: fires only on the FIRST iteration of each input
+              timestep, i.e. once per input frame instead of once per
+              iteration. With a ``(B, T, dim)`` clamped input the loop maps
+              iterations to frames via
+              ``iters_per_timestep = total_iterations // n_timesteps``; the
+              connection fires when ``i % iters_per_timestep == 0``. Off
+              boundary the multiplicative factor becomes the identity (1.0),
+              so the target passes through unchanged.
+
+            ``advance='timestep'`` is rejected for error-, precision- and
+            flow-targeting connections: those nodes are re-derived fresh every
+            iteration and do not carry, so gating them has no meaning.
+        delay: Read the pre value(s) at a temporal delay instead of live.
+            ``0`` (default) is bit-identical to today. ``delay=d >= 1`` reads
+            the pre from a per-node history ring buffer ``d`` steps back;
+            ``delay_unit='iteration'`` slides and ``delay_unit='timestep'``
+            latches (see :class:`Project`). The read is one-directional and the
+            first ``delay`` reads are zeros. **Phase 1 restriction:** every pre
+            node must be a value node; ``delay >= 1`` on an error/precision pre
+            raises ``NotImplementedError``.
+        delay_unit: ``'iteration'`` (sliding) or ``'timestep'`` (latched). See
+            ``delay``. Ignored when ``delay == 0``.
 
     Example:
         Modulate(l3.value, p2.error, update_rule=ThreeFactorHebbian(...))
@@ -999,7 +1130,18 @@ class Modulate:
         padding=None,
         weight_mask=None,
         use_bias=_DEFAULT,
+        advance: str = 'iteration',
+        delay: int = 0,
+        delay_unit: str = 'iteration',
     ):
+        if advance not in ('iteration', 'timestep'):
+            raise ValueError(
+                "Modulate(advance=...) must be 'iteration' or 'timestep', "
+                f"got {advance!r}")
+        self.advance = advance
+        self.delay = _validate_delay(delay, delay_unit)
+        self.delay_unit = delay_unit
+
         from .network import _get_current_network
         net = _get_current_network()
         defaults = net._defaults
@@ -1031,6 +1173,20 @@ class Modulate:
             raise ValueError(
                 "Flow nodes (flow_to_pre, flow_to_post) cannot be used as "
                 "pre source for Modulate connections")
+
+        # Phase 1 restriction: delay is only implemented for value pre nodes.
+        if self.delay >= 1 and any(p.node_type_id != 0 for p in self._pre_list):
+            raise NotImplementedError("delay on error/precision pres is Phase 2")
+
+        # Validate: advance='timestep' is only meaningful for value targets.
+        if advance == 'timestep' and self.post.node_type_id != 0:
+            raise ValueError(
+                "Modulate(advance='timestep') is only supported for "
+                "value-targeting connections (post is a layer value), got post "
+                f"node type {self.post.node_type!r}. Error-, precision- and "
+                "flow-targeting routing is re-derived fresh every iteration "
+                "and does not carry, so gating it to timestep boundaries has "
+                "no effect.")
 
         if update_rule is not None:
             self.update_rule = update_rule

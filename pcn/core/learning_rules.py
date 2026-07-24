@@ -112,7 +112,7 @@ class Oja(LearningRule):
 
 class NoLearning(LearningRule):
     """
-    No weight updates. For fixed connections (e.g., identity skip connections).
+    No weight updates. For fixed connections (e.g., identity/residual shortcuts).
 
     Weights initialized with init_weight on Project/Modulate remain frozen.
 

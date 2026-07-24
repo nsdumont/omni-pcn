@@ -247,6 +247,15 @@ class PredictConnSpec(NamedTuple):
     # (e.g. drift the image via the input-prediction only). Default True =
     # historical behaviour (every prediction noised when is_stochastic=True).
     stochastic: bool = True
+    # Temporal-delay read (Phase 1: value pre nodes). ``delay=0`` (default)
+    # reads the pre live, bit-identical to the historical path. ``delay>=1``
+    # reads from a per-node history ring buffer; ``delay_unit_ts`` selects
+    # sliding (False = 'iteration') vs latched (True = 'timestep').
+    # ``pre_buffer_indices`` is parallel to ``pre_idx`` and gives each pre's
+    # backend buffer index (empty tuple when ``delay==0``). Set at build time.
+    delay: int = 0
+    delay_unit_ts: bool = False
+    pre_buffer_indices: tuple = ()
 
     def apply(self, pre_act, W, b=None, pre_value=None):
         """Apply the connection transform."""
@@ -267,7 +276,7 @@ class PredictConnSpec(NamedTuple):
         return self.apply(pre_act, W, b, pre_value)
 
     def get_pre(self, values, errors, activation_fns, act_instances=(),
-                key=None):
+                key=None, delayed_srcs=None):
         """Get concatenated activated pre values, respecting slicing.
 
         ``act_instances`` is an optional per-layer tuple of Activation
@@ -277,25 +286,36 @@ class PredictConnSpec(NamedTuple):
         ``activation_fns[idx]`` is applied. The same fold (per layer index)
         means all connections reading a given layer in one iteration see the
         same noise sample.
+
+        ``delayed_srcs`` (default None) is the temporal-delay hook. When not
+        None it is a list parallel to ``pre_idx`` supplying each pre's delayed
+        (buffered) raw value; the live ``values[idx]`` read is replaced by
+        ``delayed_srcs[k]`` while activation and slicing are applied exactly as
+        before. ``None`` is the historical, live-read path (bit-identical).
         """
         parts = []
         for k, idx in enumerate(self.pre_idx):
+            base = delayed_srcs[k] if delayed_srcs is not None else values[idx]
             inst = act_instances[idx] if act_instances else None
             if inst is not None and inst.needs_key and key is not None:
-                act = inst.apply(values[idx], key=jax.random.fold_in(key, idx))
+                act = inst.apply(base, key=jax.random.fold_in(key, idx))
             else:
-                act = activation_fns[idx](values[idx])
+                act = activation_fns[idx](base)
             sl = self.pre_slices[k] if self.pre_slices else None
             if sl is not None:
                 act = act[:, sl[0]:sl[1]]
             parts.append(act)
         return parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=-1)
 
-    def get_pre_value(self, values):
-        """Get concatenated raw pre values (before activation), respecting slicing."""
+    def get_pre_value(self, values, delayed_srcs=None):
+        """Get concatenated raw pre values (before activation), respecting slicing.
+
+        ``delayed_srcs`` mirrors :meth:`get_pre`: when not None it replaces the
+        live ``values[idx]`` read with the buffered delayed value.
+        """
         parts = []
         for k, idx in enumerate(self.pre_idx):
-            v = values[idx]
+            v = delayed_srcs[k] if delayed_srcs is not None else values[idx]
             sl = self.pre_slices[k] if self.pre_slices else None
             if sl is not None:
                 v = v[:, sl[0]:sl[1]]
@@ -429,15 +449,22 @@ class PredictConnSpec(NamedTuple):
 # ============================================================================
 
 def _pm_get_pre(pre_idx, pre_node_type, values, errors, activation_fns,
-                pre_slices=(), precisions=()):
+                pre_slices=(), precisions=(), delayed_srcs=None):
     """Get concatenated activated pre node values for Project/Modulate.
 
     All pre nodes must share the same node type (enforced at construction).
+
+    ``delayed_srcs`` (default None) is the temporal-delay hook, parallel to
+    ``pre_idx``. Phase 1 only routes value pre nodes at a delay, so when it is
+    not None the value-node read uses ``delayed_srcs[k]`` in place of
+    ``values[idx]`` (activation + slicing applied as before). ``None`` is the
+    historical, live-read path.
     """
     parts = []
     for k, idx in enumerate(pre_idx):
         if pre_node_type == 0:  # value nodes
-            arr = activation_fns[idx](values[idx])
+            base = delayed_srcs[k] if delayed_srcs is not None else values[idx]
+            arr = activation_fns[idx](base)
         elif pre_node_type == 1:  # error nodes (identity activation)
             arr = errors[idx]
         else:  # pre_node_type == 2, precision nodes
@@ -496,6 +523,12 @@ class ProjectConnSpec(NamedTuple):
         learning_rate: Learning rate for weight updates
         reward_fn_idx: Index into reward functions list (-1 if not needed)
         loss_fn_idx: Index into loss functions list (-1 if not needed, for GradientDescent)
+        advance_timestep: When True (host-side ``advance='timestep'``), this
+            value-targeting connection fires only on the FIRST inference
+            iteration of each input timestep (``i % iters_per_timestep == 0``)
+            instead of on every iteration. Off boundary its additive
+            contribution is gated to 0. Only meaningful when
+            ``post_node_type == 0``; the host API rejects other targets.
     """
     pre_idx: tuple
     pre_node_type: int
@@ -525,6 +558,14 @@ class ProjectConnSpec(NamedTuple):
     post_activation_type: int = 0
     # See PredictConnSpec.is_masked.
     is_masked: bool = False
+    # Fire once per input timestep instead of once per iteration.
+    advance_timestep: bool = False
+    # Temporal-delay read (Phase 1: value pre nodes). See PredictConnSpec.
+    # Appended after advance_timestep; positional construction through
+    # loss_fn_idx (7 args) stays valid because every added field has a default.
+    delay: int = 0
+    delay_unit_ts: bool = False
+    pre_buffer_indices: tuple = ()
 
     def apply(self, pre_act, W):
         """Apply the connection transform (no bias)."""
@@ -537,10 +578,12 @@ class ProjectConnSpec(NamedTuple):
             pool_stride=self.pool_stride,
         )
 
-    def get_pre(self, values, errors, activation_fns, precisions=()):
+    def get_pre(self, values, errors, activation_fns, precisions=(),
+                delayed_srcs=None):
         """Get concatenated activated pre node values."""
         return _pm_get_pre(self.pre_idx, self.pre_node_type, values, errors,
-                           activation_fns, self.pre_slices, precisions)
+                           activation_fns, self.pre_slices, precisions,
+                           delayed_srcs=delayed_srcs)
 
     def get_post(self, values, errors, precisions=()):
         """Get post node value."""
@@ -564,6 +607,12 @@ class ModulateConnSpec(NamedTuple):
         learning_rate: Learning rate for weight updates
         reward_fn_idx: Index into reward functions list (-1 if not needed)
         loss_fn_idx: Index into loss functions list (-1 if not needed, for GradientDescent)
+        advance_timestep: When True (host-side ``advance='timestep'``), this
+            value-targeting connection fires only on the FIRST inference
+            iteration of each input timestep (``i % iters_per_timestep == 0``)
+            instead of on every iteration. Off boundary its multiplicative
+            factor is replaced by the identity (1.0). Only meaningful when
+            ``post_node_type == 0``; the host API rejects other targets.
     """
     pre_idx: tuple
     pre_node_type: int
@@ -593,6 +642,14 @@ class ModulateConnSpec(NamedTuple):
     post_activation_type: int = 0
     # See PredictConnSpec.is_masked.
     is_masked: bool = False
+    # Fire once per input timestep instead of once per iteration.
+    advance_timestep: bool = False
+    # Temporal-delay read (Phase 1: value pre nodes). See PredictConnSpec.
+    # Appended after advance_timestep; positional construction through
+    # loss_fn_idx (7 args) stays valid because every added field has a default.
+    delay: int = 0
+    delay_unit_ts: bool = False
+    pre_buffer_indices: tuple = ()
 
     def apply(self, pre_act, W):
         """Apply the connection transform (no bias)."""
@@ -605,10 +662,12 @@ class ModulateConnSpec(NamedTuple):
             pool_stride=self.pool_stride,
         )
 
-    def get_pre(self, values, errors, activation_fns, precisions=()):
+    def get_pre(self, values, errors, activation_fns, precisions=(),
+                delayed_srcs=None):
         """Get concatenated activated pre node values."""
         return _pm_get_pre(self.pre_idx, self.pre_node_type, values, errors,
-                           activation_fns, self.pre_slices, precisions)
+                           activation_fns, self.pre_slices, precisions,
+                           delayed_srcs=delayed_srcs)
 
     def get_post(self, values, errors, precisions=()):
         """Get post node value."""
@@ -674,6 +733,23 @@ class NetworkStructure(NamedTuple):
     structural_attention_groups: tuple = ()
     # Per-connection energy scale: 1/n_predicts_to_pre (pre-computed at build)
     predict_pre_scales: Tuple[float, ...] = ()
+    # Delay history buffers (Phase 1: value nodes only). One entry per
+    # (node, unit) actually read at delay>=1. ``hist_specs[k] = (node_id,
+    # depth)`` sizes the k-th ring buffer (leading dim depth+1); ``hist_unit_ts``
+    # is parallel and gives the buffer's unit (True = latched 'timestep',
+    # False = sliding 'iteration') for the write path. Empty when no delay.
+    #
+    # Phase 2 also folds the ``prev_errors`` / ``prev_precisions`` one-step
+    # carries into ``hist`` as depth-1, unit='iteration' buffers. ``hist_specs``
+    # therefore additionally describes error/precision buffers, and
+    # ``hist_node_types`` (parallel to ``hist_specs``) tags each buffer's kind:
+    # 0=value (node_id is the layer index, top-of-body from-carry-in write),
+    # 1=error / 2=precision (node_id is the predict-conn index, bottom-of-body
+    # from-recompute write). Empty ``hist_node_types`` with a non-empty
+    # ``hist_specs`` means the Phase-1 all-value case (backend defaults to 0).
+    hist_specs: tuple = ()
+    hist_unit_ts: tuple = ()
+    hist_node_types: tuple = ()
 
     def __hash__(self):
         return hash((
@@ -700,4 +776,7 @@ class NetworkStructure(NamedTuple):
             self.predict_has_flow_gates,
             self.structural_attention_groups,
             self.predict_pre_scales,
+            self.hist_specs,
+            self.hist_unit_ts,
+            self.hist_node_types,
         ))
