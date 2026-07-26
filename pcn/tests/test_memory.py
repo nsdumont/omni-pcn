@@ -202,3 +202,67 @@ class TestMemoryValidation:
             l_in = Layer(dim=1, label='in')
             with pytest.raises(ValueError):
                 Memory(l_in, dims_per_input=0)
+
+
+class TestAdvanceTimestep:
+    """Memory(advance='timestep') gates the recurrence once per input frame."""
+
+    def _mem_states(self, advance, iters_per_frame, seq):
+        import optax
+        T, Din = seq.shape[1], seq.shape[2]
+        net = PCNetwork(seed=0)
+        with net:
+            l_in = Layer(Din, activation=pcn.Direct(), label='in')
+            mem = Memory(l_in.value, dims_per_input=4, memory_type='legt',
+                         theta=float(T), dt=1.0, mode='deterministic',
+                         advance=advance, label='m')
+        net.build()
+        sim = Simulation(net)
+        freeze = {mem.recurrent._idx, mem.output._idx}
+        labels = tuple('f' if i in freeze else 'r' for i in range(len(net._layers)))
+        vopt = optax.multi_transform(
+            {'r': optax.sgd(0.5), 'f': optax.set_to_zero()}, labels)
+        res = sim.test([{'in': seq}], data_map={l_in: 'in'},
+                       iterations_per_sample=T * iters_per_frame,
+                       log_every=iters_per_frame, feedforward_init=True,
+                       values_optimizer=vopt, return_logs=True)
+        return np.array(res['values'][net['m_rec']])[0, -T:, :]
+
+    def test_advance_arg_validation(self):
+        net = PCNetwork(seed=0)
+        with net:
+            l = Layer(2, activation=pcn.Direct(), label='in')
+            with pytest.raises(ValueError, match="advance"):
+                Memory(l.value, dims_per_input=3, advance='bogus')
+
+    def test_repr_reports_advance(self):
+        net = PCNetwork(seed=0)
+        with net:
+            l = Layer(2, activation=pcn.Direct(), label='in')
+            mem = Memory(l.value, dims_per_input=3, advance='timestep')
+        assert 'advance=timestep' in repr(mem)
+
+    def test_timestep_invariant_to_iters_per_frame(self):
+        """The per-frame memory state must not depend on relaxation depth."""
+        rng = np.random.RandomState(0)
+        seq = rng.randn(1, 6, 2).astype(np.float32)
+        base = self._mem_states('timestep', 1, seq)
+        assert np.mean(np.abs(np.diff(base, axis=0))) > 1e-3   # actually integrating
+        for ipf in (2, 3, 5):
+            s = self._mem_states('timestep', ipf, seq)
+            np.testing.assert_allclose(s, base, atol=1e-4)
+
+    def test_timestep_at_one_matches_iteration(self):
+        """advance='timestep' with 1 iter/frame == legacy advance='iteration'."""
+        rng = np.random.RandomState(1)
+        seq = rng.randn(1, 6, 2).astype(np.float32)
+        np.testing.assert_allclose(self._mem_states('timestep', 1, seq),
+                                   self._mem_states('iteration', 1, seq), atol=1e-4)
+
+    def test_iteration_over_advances(self):
+        """Contrast: advance='iteration' integrates iters_per_frame times too fast."""
+        rng = np.random.RandomState(2)
+        seq = rng.randn(1, 6, 2).astype(np.float32)
+        one = self._mem_states('iteration', 1, seq)
+        three = self._mem_states('iteration', 3, seq)
+        assert np.abs(three - one).max() > 0.1

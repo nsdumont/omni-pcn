@@ -132,7 +132,17 @@ class Memory:
         dims_per_input: Polynomial order ``d`` (memory dims per input channel).
         memory_type: ``'legt'``/``'lmu'`` (Legendre) or ``'lagt'`` (Laguerre).
         theta: Window length ``θ`` of the continuous delay network.
-        dt: Per-inference-iteration timestep (see module docstring on timing).
+        dt: Timestep. With ``advance='iteration'`` (default) this is the
+            per-inference-iteration step (see module docstring on timing); with
+            ``advance='timestep'`` the recurrence advances once per input frame,
+            so ``dt`` is the per-frame step (e.g. ``dt=1``, ``theta=n_frames``).
+        advance: When the recurrence advances. ``'iteration'`` (default) steps the
+            memory every inference iteration (historical behavior). ``'timestep'``
+            gates the recurrence Projects with ``advance='timestep'`` so the memory
+            steps once per input frame while downstream layers relax for
+            ``iters_per_timestep`` iterations against a held memory — decoupling
+            relaxation depth from the memory's integration rate. The output-mirror
+            Projects stay per-iteration so the readout tracks the held state.
         mode: ``'deterministic'`` (default; adds an output mirror layer so energy
             only affects the readout) or ``'energy_coupled'`` (readouts couple
             energy into the memory).
@@ -157,6 +167,7 @@ class Memory:
         theta: float = 1.0,
         dt: float = 1.0,
         mode: str = 'deterministic',
+        advance: str = 'iteration',
         label: Optional[str] = None,
     ):
         from .network import _get_current_network
@@ -170,6 +181,9 @@ class Memory:
         if mode not in ('deterministic', 'energy_coupled'):
             raise ValueError(
                 f"mode must be 'deterministic' or 'energy_coupled', got {mode!r}")
+        if advance not in ('iteration', 'timestep'):
+            raise ValueError(
+                f"advance must be 'iteration' or 'timestep', got {advance!r}")
         if dims_per_input < 1:
             raise ValueError("dims_per_input must be >= 1")
         if theta <= 0 or dt <= 0:
@@ -188,6 +202,7 @@ class Memory:
         self.theta = float(theta)
         self.dt = float(dt)
         self.mode = mode
+        self.advance = advance
         self.input_dim = n
         self.d = int(dims_per_input)
         self.dim = n * self.d
@@ -212,20 +227,27 @@ class Memory:
         self.recurrent = Layer(
             dim=self.dim, activation=Direct(), label=f"{self.label}_rec")
 
-        # Recurrence (Jacobi: order-independent): m += (Ā−I)m + B̄u  ⇒  Ā m + B̄ u
+        # Recurrence (Jacobi: order-independent): m += (Ā−I)m + B̄u  ⇒  Ā m + B̄ u.
+        # advance='timestep' gates these so the memory steps once per input frame
+        # (held while downstream relaxes); 'iteration' is the historical behavior.
         self.projects.append(Project(
             self.recurrent.value, self.recurrent.value,
             update_rule=NoLearning(),
             init_weight=jnp.asarray(S_full, dtype=jnp.float32),
+            advance=advance,
             label=f"{self.label}_self"))
         self.projects.append(Project(
             self.input, self.recurrent.value,
             update_rule=NoLearning(),
             init_weight=jnp.asarray(Bbar_full, dtype=jnp.float32),
+            advance=advance,
             label=f"{self.label}_input"))
 
         if mode == 'deterministic':
             # Output mirror: out += −I·out + I·rec  ⇒  out = rec (+ readout energy).
+            # Kept per-iteration (NOT gated): under advance='timestep' the recurrent
+            # state is held within a frame, so the mirror simply tracks it each
+            # iteration; gating it too would lag the readout by one frame.
             self.output = Layer(
                 dim=self.dim, activation=Direct(), label=f"{self.label}_out")
             eye_D = jnp.eye(self.dim, dtype=jnp.float32)
@@ -300,4 +322,4 @@ class Memory:
     def __repr__(self):
         return (f"Memory({self.memory_type}, input_dim={self.input_dim}, "
                 f"d={self.d}, D={self.dim}, theta={self.theta}, dt={self.dt}, "
-                f"mode={self.mode})")
+                f"mode={self.mode}, advance={self.advance})")
