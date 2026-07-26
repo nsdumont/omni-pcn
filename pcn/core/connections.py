@@ -450,7 +450,15 @@ class Predict:
             multiplied into ``W`` at init and after every weight update.
             Entries do not need to be binary.
         order: Execution order (lower = earlier). If None, uses definition order.
-        init_weight: If provided, weights are fixed to this value and not learned.
+        init_weight: Initial weight matrix ``(post_dim, pre_dim)``. By default the
+            weights are then *fixed* (not learned) — set ``learn_weights=True`` to
+            initialize from ``init_weight`` yet keep learning them (e.g. to seed a
+            readout with ``Memory.C(0)`` and refine it).
+        learn_weights: Tri-state weight-learning override. ``None`` (default) keeps
+            the legacy behaviour — a connection with ``init_weight`` is frozen, one
+            without is learned. ``True`` forces learning (init from ``init_weight``
+            if given, else random). ``False`` freezes the weights even without an
+            ``init_weight``.
         init_precision: Initial precision value (in precision-space, not log).
             The precision bias is initialized such that, under the chosen
             ``precision_parameterization``, the starting precision equals this
@@ -543,6 +551,7 @@ class Predict:
         label: Optional[str] = None,
         order: Optional[int] = None,
         init_weight: Optional[np.ndarray] = None,
+        learn_weights: Optional[bool] = None,
         init_bias: Optional[np.ndarray] = None,
         use_bias=_DEFAULT,
         init_precision=_DEFAULT,
@@ -595,6 +604,7 @@ class Predict:
         self.label = label
         self.order = order
         self.weight = init_weight
+        self.learn_weights = learn_weights
         self.bias = init_bias
         self.n_bands = n_bands
         self.stochastic = stochastic   # per-conn is_stochastic noise gate

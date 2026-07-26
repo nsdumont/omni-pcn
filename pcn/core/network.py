@@ -486,7 +486,10 @@ class PCNetwork:
             return PredictConnSpec(
                 pre_idx=tuple(p._idx for p in conn.pre),
                 post_idx=conn.post._idx,
-                has_fixed_weights=conn.weight is not None,
+                has_fixed_weights=(
+                    (conn.weight is not None)
+                    if getattr(conn, 'learn_weights', None) is None
+                    else (not conn.learn_weights)),
                 learn_precision_weights=conn.learn_precision_weights,
                 learn_precision_bias=conn.learn_precision_bias,
                 alpha=conn.alpha,
