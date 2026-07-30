@@ -193,9 +193,12 @@ def _delayed_srcs(conn, hist, tick_base, iter_idx, ipt):
 
     Returns None on the static ``delay == 0`` path so the caller's ``get_pre``
     takes the historical live-read branch (bit-identical). Only built when the
-    conn statically asks for a delay.
+    conn statically asks for a delay. Also returns None when no ``hist`` is
+    threaded (the initial ``_single_pass`` runs before the ring buffers exist —
+    previously an IndexError for delayed Project/Modulate at the init pass;
+    the live read there matches the zero-iteration semantics).
     """
-    if conn.delay == 0:
+    if conn.delay == 0 or not hist:
         return None
     return [
         _read_delayed(hist, conn.pre_buffer_indices[k], conn.delay,
@@ -1782,7 +1785,14 @@ def run_batch(
     _hist_unit_ts = structure.hist_unit_ts
     # Legacy/manual structures may omit node types -> Phase-1 all-value default.
     _hist_node_types = structure.hist_node_types or tuple(0 for _ in _hist_specs)
-    _precision_dims = tuple(pb.shape[0] for pb in precision_biases)
+    # Runtime precision arrays are (B, error_dim) (broadcast from the bias),
+    # except unit_precision conns which are (B, 1). Sizing rings from the
+    # STORED bias shape breaks for scalar ``init_precision`` biases of shape
+    # (1,) as soon as a precision consumer exists (write of (B, D) into a
+    # (depth, B, 1) ring).
+    _precision_dims = tuple(
+        1 if conn.unit_precision else ed
+        for conn, ed in zip(predict_conns, predict_error_dims))
 
     def _hist_buf_dim(node_type, node_id):
         if node_type == 0:
@@ -2005,7 +2015,13 @@ def run_batch(
         energies = jnp.zeros((n_logged,))
         values_log = tuple(jnp.zeros((n_logged, batch_size, dim)) for dim in layer_dims)
         errors_log = tuple(jnp.zeros((n_logged, batch_size, dim)) for dim in predict_error_dims)
-        precision_dims = tuple(pb.shape[0] for pb in precision_biases)
+        # Same sizing rule as the delay rings: runtime precisions are
+        # (B, error_dim) once any precision routing applies (a modulated
+        # (B, 1) bias precision broadcasts to the gate's full dim), so logs
+        # sized from the stored bias shape would reject the write. (B, 1)
+        # entries still broadcast INTO a full-dim slot, so this is
+        # shape-compatible for all previously working nets.
+        precision_dims = _precision_dims
         precisions_log = tuple(jnp.zeros((n_logged, batch_size, dim)) for dim in precision_dims)
         # deltas share the per-Predict-connection error shape
         deltas_log = tuple(jnp.zeros((n_logged, batch_size, dim)) for dim in predict_error_dims)

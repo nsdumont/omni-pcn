@@ -19,6 +19,12 @@ from .vision import (
     DivisiveNormalization,
     GaborBank,
     ComplexEnergy,
+    ColorOpponent,
+    GaussianBlur,
+    SpatialPool,
+    ChannelStandardize,
+    ChannelSelect,
+    ParallelPathways,
 )
 from .audio import (
     AuditoryInput,
@@ -41,6 +47,12 @@ __all__ = [
     "DivisiveNormalization",
     "GaborBank",
     "ComplexEnergy",
+    "ColorOpponent",
+    "GaussianBlur",
+    "SpatialPool",
+    "ChannelStandardize",
+    "ChannelSelect",
+    "ParallelPathways",
     # audio
     "AuditoryInput",
     "MelPower",

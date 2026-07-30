@@ -11,7 +11,8 @@ import pytest
 import pcn
 from pcn.core.sensory.base import SensoryTransform, Sequential
 from pcn.core.sensory.vision import (
-    DoGCenterSurround, GaborBank, DivisiveNormalization, ComplexEnergy)
+    DoGCenterSurround, GaborBank, DivisiveNormalization, ComplexEnergy,
+    ColorOpponent, GaussianBlur, SpatialPool, ChannelStandardize)
 from pcn.core.sensory.audio import (
     MelPower, PowerCompression, LateralInhibition, LeakyIntegrator, STRFBank)
 
@@ -83,6 +84,39 @@ class TestVisionTransform:
         f = jax.jit(t.forward)
         img = jnp.zeros((1, 1, 28, 28))
         assert f(img).shape == (1, 18, 28, 28)
+
+
+class TestEncoderStages:
+    """v2 encoder building blocks (color, pooling, normalization)."""
+
+    def test_color_opponent_exact_inverse(self):
+        co = ColorOpponent((16, 16))
+        rng = np.random.RandomState(0)
+        x = jnp.asarray(rng.randn(4, 3, 16, 16).astype(np.float32))
+        assert co.forward(x).shape == (4, 3, 16, 16)
+        assert jnp.allclose(co.inverse(co.forward(x)), x, atol=1e-4)
+
+    def test_spatial_pool_shape_and_upsample_inverse(self):
+        sp = SpatialPool((16, 16), channels=5, pool_size=4)
+        assert sp.out_shape == (5, 4, 4)
+        y = jnp.asarray(np.random.RandomState(1).randn(2, 5, 4, 4).astype(np.float32))
+        # avg-pool inverse is nearest-upsample; pooling it back is the identity
+        assert jnp.allclose(sp.forward(sp.inverse(y)), y, atol=1e-4)
+
+    def test_spatial_pool_requires_divisor(self):
+        with pytest.raises(ValueError):
+            SpatialPool((30, 30), channels=3, pool_size=4)
+
+    def test_channel_standardize_exact_inverse(self):
+        cs = ChannelStandardize((3, 8, 8))
+        cs.set_scale([2.0, 0.5, 4.0])
+        x = jnp.asarray(np.random.RandomState(2).randn(2, 3, 8, 8).astype(np.float32))
+        assert jnp.allclose(cs.inverse(cs.forward(x)), x, atol=1e-5)
+
+    def test_gaussian_blur_shape_preserving(self):
+        gb = GaussianBlur((16, 16), channels=2, sigma=2.0)
+        x = jnp.zeros((3, 2, 16, 16))
+        assert gb.forward(x).shape == (3, 2, 16, 16)
 
 
 # --------------------------------------------------------------------------- #
@@ -192,11 +226,41 @@ class TestSensoryInputLayers:
         w = jnp.zeros((2, 8192))
         assert ai.encode(w).shape == (2, ai.dim)
 
-    def test_visual_input_rejects_color(self):
+    def test_visual_input_rejects_bad_shape(self):
         net = pcn.PCNetwork(seed=0)
         with net:
-            with pytest.raises(NotImplementedError):
-                pcn.VisualInput(in_shape=(3, 32, 32))
+            with pytest.raises(ValueError):
+                pcn.VisualInput(in_shape=(4, 32, 32))     # only 1 or 3 channels
+
+    def test_visual_encoder_rgb_opponent_downsample(self):
+        """v2 encoder: RGB opponent input, pooled below raw resolution, fit norm."""
+        net = pcn.PCNetwork(seed=0)
+        with net:
+            enc = pcn.VisualInput(in_shape=(3, 32, 32), color='opponent',
+                                  downsample=4, complex_cells=True, keep_lowpass=True)
+        # form energy (4*2) + magno luma (1) + chroma (2) = 11 channels @ 8x8
+        assert enc.feature_shape == (11, 8, 8)
+        assert enc.raw_shape == (3, 32, 32)
+        assert enc.dim == 11 * 8 * 8
+        assert enc.dim < 3 * 32 * 32                       # a *reduction*, not expansion
+
+        rng = np.random.RandomState(0)
+        rgb = jnp.asarray(rng.randn(5, 3 * 32 * 32).astype(np.float32))
+        assert enc.encode(rgb).shape == (5, enc.dim)
+        assert enc.decode(enc.encode(rgb)).shape == (5, 3 * 32 * 32)
+
+        enc.fit(rgb)                                       # freeze per-channel gain
+        f = np.asarray(enc.encode(rgb)).reshape(5, enc.feature_shape[0], -1)
+        assert np.allclose(f.std(axis=(0, 2)), 1.0, atol=1e-3)
+
+    def test_visual_encoder_gray(self):
+        net = pcn.PCNetwork(seed=0)
+        with net:
+            enc = pcn.VisualInput(in_shape=(1, 32, 32), color='gray',
+                                  downsample=2, complex_cells=True)
+        assert enc.feature_shape == (8, 16, 16)           # 4*2 energy channels
+        img = jnp.zeros((3, 32 * 32))
+        assert enc.encode(img).shape == (3, enc.dim)
 
 
 # --------------------------------------------------------------------------- #

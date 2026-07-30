@@ -75,6 +75,7 @@ from .core.activations import activation_from_name, ACTIVATION_REGISTRY
 # High-level API
 from .simulation import Simulation
 from .backprop_simulation import BackpropSimulation
+from .bptt_simulation import BPTTSimulation
 
 # Optimizers
 from .core.optimizers import natural_gradient_precision
@@ -162,6 +163,7 @@ __all__ = [
     # High-level API
     'Simulation',
     'BackpropSimulation',
+    'BPTTSimulation',
     # Optimizers
     'natural_gradient_precision',
     # Submodules

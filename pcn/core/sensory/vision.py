@@ -19,8 +19,9 @@ The Gabor channels are kept signed but are redundant for reconstruction in v1; a
 joint least-squares inverse that also uses them is a documented future refinement.
 """
 
-from typing import Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import jax.numpy as jnp
 
 from .base import SensoryTransform, Sequential, SensoryInput
@@ -167,22 +168,258 @@ class ComplexEnergy(SensoryTransform):
         return y[:, :self.in_shape[0]]
 
 
+# =========================================================================== #
+#  v2 encoder stages: color, downsampling, built-in normalization             #
+#                                                                             #
+#  These turn ``VisualInput`` from a full-resolution feature *expansion* into #
+#  a downsampling *encoder* that can replace the early conv+pool blocks of a   #
+#  PC network (retina→V1→pool→normalize), with native RGB via color-opponent  #
+#  channels. See visin_redesign.md.                                           #
+# =========================================================================== #
+
+class ColorOpponent(SensoryTransform):
+    """Retinal/LGN color-opponent decomposition ``(3,H,W) -> (3,H,W)``.
+
+    Fixed 3×3 per-pixel map to ``(Y, R−G, B−Y)``: a luminance (form) channel plus
+    two chromatic-opponent channels. Unlike a per-channel luminance front-end
+    (which discards the chromatic mean), this preserves color as low-frequency
+    opponent signals. Exactly invertible (the matrix is full rank).
+    """
+
+    _M = np.array([[0.299, 0.587, 0.114],    # Y   (luma)
+                   [1.0, -1.0, 0.0],          # R−G
+                   [-0.5, -0.5, 1.0]],        # B−Y
+                  dtype=np.float64)
+
+    def __init__(self, spatial_shape: Tuple[int, int]):
+        h, w = spatial_shape
+        self.in_shape = (3, h, w)
+        self.out_shape = (3, h, w)
+        self._Mf = jnp.asarray(self._M.astype(np.float32))
+        self._Minv = jnp.asarray(np.linalg.inv(self._M).astype(np.float32))
+
+    def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
+        # highest precision: a fixed 3x3 color map should invert exactly, not at
+        # TF32 (~2e-3) accuracy; the matmul is tiny so the cost is negligible.
+        return jnp.einsum('oc,bchw->bohw', self._Mf, x, precision='highest')
+
+    def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
+        return jnp.einsum('co,bohw->bchw', self._Minv, y, precision='highest')
+
+
+class GaussianBlur(SensoryTransform):
+    """Per-channel spatial low-pass (circular Gaussian conv), shape-preserving.
+
+    Used for the low-frequency pathways (magnocellular luma + chroma), which the
+    band-pass DoG/Gabor stages throw away. Low-pass is not invertible from its
+    output alone, so ``inverse`` is identity (a mild blur survives ``decode`` —
+    documented, like :class:`DivisiveNormalization`).
+    """
+
+    def __init__(self, spatial_shape: Tuple[int, int], channels: int,
+                 sigma: float = 2.0, size: Optional[int] = None):
+        h, w = spatial_shape
+        self.in_shape = (channels, h, w)
+        self.out_shape = (channels, h, w)
+        self._c = channels
+        if size is None:
+            size = int(2 * round(3 * sigma) + 1)
+        size = max(3, min(size, h if h % 2 == 1 else h - 1))
+        kernel = _filters.gaussian_kernel_2d(sigma, size)
+        self._bank = _filters.FFTConvBank([kernel], (h, w))
+
+    def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
+        b, c, h, w = x.shape
+        y = self._bank.apply(x.reshape(b * c, h, w))[:, 0]     # (b*c, H, W)
+        return y.reshape(b, c, h, w)
+
+    def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
+        return y
+
+
+class SpatialPool(SensoryTransform):
+    """Non-overlapping spatial pooling ``(C,H,W) -> (C, H/p, W/p)``.
+
+    The dimensionality-reducing "pool1" of the encoder — this is what lets the
+    fixed features *replace* a conv+pool block instead of expanding the input.
+    ``mode='avg'`` (default) inverts to a nearest-neighbour upsample (approximate);
+    ``'max'`` is available but its inverse is cruder.
+    """
+
+    def __init__(self, spatial_shape: Tuple[int, int], channels: int,
+                 pool_size: int = 2, mode: str = 'avg'):
+        h, w = spatial_shape
+        if h % pool_size or w % pool_size:
+            raise ValueError(f"pool_size {pool_size} must divide {(h, w)}")
+        if mode not in ('avg', 'max'):
+            raise ValueError(f"mode must be 'avg' or 'max', got {mode!r}")
+        self.in_shape = (channels, h, w)
+        self.out_shape = (channels, h // pool_size, w // pool_size)
+        self.p = pool_size
+        self.mode = mode
+
+    def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
+        b, c, h, w = x.shape
+        p = self.p
+        g = x.reshape(b, c, h // p, p, w // p, p)
+        return g.max(axis=(3, 5)) if self.mode == 'max' else g.mean(axis=(3, 5))
+
+    def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
+        return jnp.repeat(jnp.repeat(y, self.p, axis=2), self.p, axis=3)
+
+
+class ChannelStandardize(SensoryTransform):
+    """Fixed per-channel gain ``x * scale``, shape-preserving and exactly invertible.
+
+    The scale is frozen after :meth:`VisualInput.fit` measures each channel's std
+    on a calibration batch (``scale = 1/std``). This folds the +19 pp feature-scale
+    fix from exp-CIFAR10-disc-conv-visin *into* the encoder, so callers no longer
+    re-derive it. Before fitting, ``scale = 1`` (identity), so ``encode`` returns
+    the un-normalized features that :meth:`fit` measures.
+    """
+
+    def __init__(self, shape: Tuple[int, ...], scale: Optional[Sequence[float]] = None):
+        self.in_shape = tuple(shape)
+        self.out_shape = tuple(shape)
+        c = int(shape[0])
+        self.fitted = scale is not None
+        s = np.ones(c, np.float32) if scale is None else np.asarray(scale, np.float32)
+        self._scale = jnp.asarray(s.reshape(1, c, *([1] * (len(shape) - 1))))
+
+    def set_scale(self, scale: Sequence[float]) -> None:
+        c = self.in_shape[0]
+        s = np.asarray(scale, np.float32).reshape(1, c, *([1] * (len(self.in_shape) - 1)))
+        self._scale = jnp.asarray(s)
+        self.fitted = True
+
+    def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
+        return x * self._scale
+
+    def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
+        return y / self._scale
+
+
+class ChannelSelect(SensoryTransform):
+    """Keep a contiguous channel slice ``(C,H,W) -> (length,H,W)``.
+
+    Used to keep only the phase-invariant complex-energy channels (dropping the
+    raw quadrature Gabor pairs). Non-invertible (dropped channels are zero-filled
+    on ``inverse``).
+    """
+
+    def __init__(self, spatial_shape: Tuple[int, int], in_channels: int,
+                 start: int, length: int):
+        h, w = spatial_shape
+        self.in_shape = (in_channels, h, w)
+        self.out_shape = (length, h, w)
+        self.start = start
+        self.length = length
+
+    def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
+        return x[:, self.start:self.start + self.length]
+
+    def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
+        b, _, h, w = y.shape
+        out = jnp.zeros((b,) + self.in_shape)
+        return out.at[:, self.start:self.start + self.length].set(y)
+
+
+class ParallelPathways(SensoryTransform):
+    """Route channel-slices of the input through independent sub-transforms and
+    concatenate their outputs ``(C_in,H,W) -> (ΣC_out, H, W)``.
+
+    This builds the retina's parallel streams: a high-detail luma *form* pathway
+    (DoG→Gabor→complex energy) beside low-frequency *magno* (blurred luma) and
+    *chroma* (blurred opponent) pathways. Every sub-transform must preserve the
+    spatial shape ``(H,W)``.
+
+    ``inverse`` reconstructs each input slice from the pathway flagged
+    ``invertible`` (later pathways win on overlap); non-invertible pathways (the
+    phase-discarding form pathway) contribute nothing, so ``decode`` recovers a
+    blurred-color approximation — honest for a complex-cell readout.
+    """
+
+    def __init__(self, spatial_shape: Tuple[int, int], in_channels: int,
+                 pathways: List[Dict]):
+        h, w = spatial_shape
+        self.in_shape = (in_channels, h, w)
+        self.out_shape = (sum(p['transform'].out_shape[0] for p in pathways), h, w)
+        self.pathways = pathways
+
+    def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
+        outs = []
+        for p in self.pathways:
+            xs = x[:, p['in_start']:p['in_start'] + p['in_len']]
+            outs.append(p['transform']._forward(xs))
+        return jnp.concatenate(outs, axis=1)
+
+    def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
+        recon = jnp.zeros((y.shape[0],) + self.in_shape)
+        off = 0
+        for p in self.pathways:
+            co = p['transform'].out_shape[0]
+            ys = y[:, off:off + co]
+            off += co
+            if p.get('invertible', False):
+                xs = p['transform']._inverse(ys)
+                recon = recon.at[:, p['in_start']:p['in_start'] + p['in_len']].set(xs)
+        return recon
+
+
 class VisualInput(SensoryInput):
     """A ``SensoryInput`` layer with a fixed retina→V1 feature transform.
 
+    Two modes share this class:
+
+    **Legacy full-resolution feature map** (default, single-channel input). DoG
+    ON/OFF center-surround → Gabor simple-cell bank, at full resolution:
+    ``(2 + orientations·|wavelengths|·|phases|, H, W)`` = ``(18, H, W)`` for the
+    defaults. This *expands* the input (see exp-CIFAR10-disc-conv-visin: as an
+    added stage in front of a learned conv net it costs accuracy).
+
+    **v2 downsampling encoder** (opt-in — enabled by any of ``color='opponent'``,
+    ``downsample > 1``, ``complex_cells=True``, ``keep_lowpass=True``, or an
+    explicit ``normalize``). A retina→V1→pool→normalize pipeline meant to *replace*
+    the early conv+pool blocks of a PC network so the learned part can be
+    shallower:
+
+        ColorOpponent (Y,R−G,B−Y) → parallel pathways → [DivisiveNorm] →
+        SpatialPool(/downsample) → ChannelStandardize
+
+    Parallel pathways: a luma *form* pathway (DoG → Gabor → optional phase-invariant
+    ComplexEnergy), plus low-frequency *magno* (blurred luma) and *chroma* (blurred
+    opponent) pathways so mean luminance/color survive. The pooled output
+    ``(C, H/downsample, W/downsample)`` is *smaller* than the raw image. Call
+    :meth:`fit` on a calibration batch to freeze the per-channel normalization.
+
     Args:
-        in_shape: raw image shape, ``(H, W)`` or ``(1, H, W)`` (grayscale/luma).
+        in_shape: raw image shape, ``(H, W)`` / ``(1, H, W)`` (gray) or
+            ``(3, H, W)`` (RGB — v2 encoder).
+        color: ``'gray'`` (luma only), ``'opponent'`` (Y, R−G, B−Y). Default:
+            ``'opponent'`` for 3-channel input, ``'gray'`` for 1-channel.
+        downsample: integer spatial pooling factor for the encoder output
+            (1 = legacy full resolution).
+        complex_cells: use phase-invariant complex-energy channels in the form
+            pathway (replaces the raw quadrature Gabor pairs).
+        keep_lowpass: add a blurred-luma (magnocellular) low-frequency channel,
+            restoring the DC the band-pass DoG drops.
+        lowpass_sigma: Gaussian sigma for the magno/chroma low-pass pathways.
+        normalize: ``'std'`` (per-channel gain via :meth:`fit`), ``None``, or
+            ``'auto'`` (``'std'`` in encoder mode, ``None`` in legacy mode).
         orientations, wavelengths, phases, gamma, sigma_ratio: Gabor bank params.
         sigma_c, sigma_s, dog_size, dog_balance: DoG center-surround params.
-        contrast_norm: insert ``DivisiveNormalization`` after the Gabor stage.
-        complex_energy: append ``ComplexEnergy`` readout channels.
+        contrast_norm: insert ``DivisiveNormalization`` (LGN contrast gain).
+        complex_energy: legacy — *append* ``ComplexEnergy`` channels (full-res mode).
         activation, label: forwarded to ``SensoryInput``.
-
-    Default output feature map: ``(2 + orientations·|wavelengths|·|phases|, H, W)``
-    = ``(18, H, W)`` for the defaults.
     """
 
     def __init__(self, in_shape: Tuple[int, ...] = (1, 28, 28), *,
+                 color: Optional[str] = None,
+                 downsample: int = 1,
+                 complex_cells: bool = False,
+                 keep_lowpass: bool = False,
+                 lowpass_sigma: float = 2.0,
+                 normalize: Optional[str] = 'auto',
                  orientations: int = 4,
                  wavelengths: Sequence[float] = (3.0, 6.0),
                  phases: Sequence[float] = (0.0, jnp.pi / 2),
@@ -193,22 +430,101 @@ class VisualInput(SensoryInput):
                  activation=None, label: Optional[str] = None):
         if len(in_shape) == 2:
             in_shape = (1,) + tuple(in_shape)
-        if len(in_shape) != 3 or in_shape[0] != 1:
-            raise NotImplementedError(
-                "VisualInput v1 supports single-channel (grayscale/luma) input "
-                f"(1, H, W); got {in_shape}. Multi-channel color is a future extension.")
-        _, h, w = in_shape
+        if len(in_shape) != 3 or in_shape[0] not in (1, 3):
+            raise ValueError(
+                f"in_shape must be (H,W), (1,H,W) or (3,H,W); got {in_shape}")
+        n_in, h, w = in_shape
         hw = (h, w)
+        if color is None:
+            color = 'opponent' if n_in == 3 else 'gray'
+        if color not in ('gray', 'opponent'):
+            raise ValueError(f"color must be 'gray' or 'opponent', got {color!r}")
 
-        dog = DoGCenterSurround(hw, sigma_c, sigma_s, dog_size, dog_balance)
-        gabor = GaborBank(hw, orientations, wavelengths, phases, gamma, sigma_ratio)
-        stages = [dog, gabor]
+        encoder = (downsample > 1 or complex_cells or keep_lowpass
+                   or color == 'opponent' or n_in == 3
+                   or normalize not in (None, 'auto'))
+        if normalize == 'auto':
+            normalize = 'std' if encoder else None
+        self._standardize: Optional[ChannelStandardize] = None
+
+        if not encoder:
+            # ---- Legacy full-resolution feature map (unchanged v1 behaviour) --
+            dog = DoGCenterSurround(hw, sigma_c, sigma_s, dog_size, dog_balance)
+            gabor = GaborBank(hw, orientations, wavelengths, phases, gamma, sigma_ratio)
+            stages: List[SensoryTransform] = [dog, gabor]
+            if contrast_norm:
+                stages.append(DivisiveNormalization(hw, gabor.out_shape[0]))
+            if complex_energy:
+                stages.append(ComplexEnergy(
+                    hw, in_channels=stages[-1].out_shape[0],
+                    orientations=orientations, n_scales=len(wavelengths),
+                    n_phases=len(phases), gabor_offset=2))
+            super().__init__(Sequential(stages), activation=activation, label=label)
+            return
+
+        # ---- v2 downsampling encoder -------------------------------------- #
+        stages = []
+        if color == 'opponent':
+            if n_in != 3:
+                raise ValueError("color='opponent' requires a (3,H,W) input")
+            stages.append(ColorOpponent(hw))
+            pathway_in = 3
+        else:                                            # gray
+            pathway_in = 1
+            if n_in == 3:
+                raise ValueError("color='gray' requires a (1,H,W) input")
+
+        # Luma *form* pathway: DoG -> Gabor (-> complex energy), on channel 0.
+        form_stages: List[SensoryTransform] = [
+            DoGCenterSurround(hw, sigma_c, sigma_s, dog_size, dog_balance),
+            GaborBank(hw, orientations, wavelengths, phases, gamma, sigma_ratio)]
+        if complex_cells:
+            ce = ComplexEnergy(hw, in_channels=form_stages[-1].out_shape[0],
+                               orientations=orientations, n_scales=len(wavelengths),
+                               n_phases=len(phases), gabor_offset=2)
+            form_stages.append(ce)
+            # keep only the phase-invariant energy channels (drop raw phase pairs)
+            form_stages.append(ChannelSelect(
+                hw, ce.out_shape[0], ce.out_shape[0] - ce.n_energy, ce.n_energy))
+        form = Sequential(form_stages)
+        pathways: List[Dict] = [
+            dict(in_start=0, in_len=1, transform=form, invertible=False)]
+
+        if keep_lowpass:                                 # magnocellular luma DC
+            pathways.append(dict(in_start=0, in_len=1, invertible=True,
+                                 transform=GaussianBlur(hw, 1, lowpass_sigma)))
+        if color == 'opponent':                          # chroma (low bandwidth)
+            pathways.append(dict(in_start=1, in_len=2, invertible=True,
+                                 transform=GaussianBlur(hw, 2, lowpass_sigma)))
+
+        stages.append(ParallelPathways(hw, pathway_in, pathways))
+        c = stages[-1].out_shape[0]
         if contrast_norm:
-            stages.append(DivisiveNormalization(hw, gabor.out_shape[0]))
-        if complex_energy:
-            stages.append(ComplexEnergy(
-                hw, in_channels=stages[-1].out_shape[0],
-                orientations=orientations, n_scales=len(wavelengths),
-                n_phases=len(phases), gabor_offset=2))
+            stages.append(DivisiveNormalization(hw, c))
+        if downsample > 1:
+            stages.append(SpatialPool(hw, c, downsample))
+        hn, wn = h // downsample, w // downsample
+        if normalize == 'std':
+            self._standardize = ChannelStandardize((c, hn, wn))
+            stages.append(self._standardize)
+        elif normalize is not None:
+            raise ValueError(f"normalize must be 'std', None or 'auto', got {normalize!r}")
 
         super().__init__(Sequential(stages), activation=activation, label=label)
+
+    def fit(self, raw: jnp.ndarray) -> "VisualInput":
+        """Freeze the built-in per-channel normalization from a calibration batch.
+
+        Measures each feature channel's std on ``raw`` (un-augmented images are
+        best) and sets the :class:`ChannelStandardize` gain to ``1/std``. No-op if
+        the encoder was built with ``normalize=None`` or in legacy mode. Returns
+        ``self`` for chaining.
+        """
+        if self._standardize is None:
+            return self
+        feats = self.encode(raw)                          # scale=1 -> pre-norm feats
+        c = self.feature_shape[0]
+        f = np.asarray(feats).reshape(feats.shape[0], c, -1)
+        std = f.std(axis=(0, 2))
+        self._standardize.set_scale(1.0 / (std + 1e-6))
+        return self

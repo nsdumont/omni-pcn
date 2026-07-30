@@ -17,11 +17,13 @@ from .simulation import (
     ACTIVATIONS,
 )
 from .backprop_simulation import run_backprop_batch
+from .bptt_simulation import run_bptt_batch
 
 __all__ = [
     # Main entry points
     'run_batch',
     'run_backprop_batch',
+    'run_bptt_batch',
     # Activation functions
     'ACTIVATIONS',
 ]
