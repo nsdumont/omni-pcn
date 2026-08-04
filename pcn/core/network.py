@@ -955,6 +955,7 @@ class PCNetwork:
                     fan_out = post_dim
                 self.rng, subkey = jax.random.split(self.rng)
                 stddev = jnp.sqrt(2.0 / (fan_in + fan_out))
+                stddev = stddev * getattr(conn, 'init_scale', 1.0)
                 W = jax.random.normal(subkey, shape) * stddev
                 if conn.n_bands > 0 and not is_conv:
                     W = W * _make_band_mask(fan_out, fan_in, conn.n_bands)

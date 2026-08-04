@@ -875,16 +875,22 @@ class Project:
 
     Args:
         pre: Source node(s). A NodeRef, Layer (treated as layer.value),
-            or list thereof. For multi-pre, values are concatenated.
+            or indexed node (e.g. value[i:j]) or a list of nodes. 
+            For multi-pre, values are concatenated.
             All pre nodes must share the same node type (value or error).
         post: Target node. A NodeRef or Layer (treated as layer.value).
-        transformation: Transform type ('linear', 'linear-<activation>' for
+        transformation: Transform type ('linear' (default), 'linear-<activation>' for
             ``g(W f(x) + b)`` post-nonlinearity, 'conv', 'transconv',
             'banded{N}', 'masked'). ``'masked'`` requires ``weight_mask``.
         update_rule: Learning rule for weight updates (default: Hebbian).
-        order: Execution order (lower = earlier).
-        init_weight: Optional initial weight matrix. The connection still learns
-            from this starting point (unlike Predict, learning is not disabled).
+        order: Execution order (lower = earlier). Matters if using a mix of Project and Modulate conns.
+        init_weight: Optional initial weight matrix. 
+        init_scale: Scalar multiplier on the default weight init (Gaussian with
+            stddev ``sqrt(2 / (fan_in + fan_out))``), i.e. the built weights are
+            ``init_scale * sqrt(2/(fan_in+fan_out)) * N(0, 1)``. Ignored when
+            ``init_weight`` is given. Default 1.0.
+            Use for fixed random projections whose overall gain matters, e.g.
+            HEP error highways (``NoLearning`` + small ``init_scale``).
         init_bias: Optional initial bias vector (only used if ``use_bias`` is True).
         use_bias: Whether to add a bias term: ``target += W @ f(pre) + b``.
             Defaults to the network-level ``use_bias`` config setting.
@@ -939,6 +945,7 @@ class Project:
         update_rule: Optional[LearningRule] = None,
         order: Optional[int] = None,
         init_weight: Optional[np.ndarray] = None,
+        init_scale: float = 1.0,
         init_bias: Optional[np.ndarray] = None,
         use_bias=_DEFAULT,
         label: Optional[str] = None,
@@ -957,6 +964,7 @@ class Project:
                 "Project(advance=...) must be 'iteration' or 'timestep', "
                 f"got {advance!r}")
         self.advance = advance
+        self.init_scale = float(init_scale)
         self.delay = _validate_delay(delay, delay_unit)
         self.delay_unit = delay_unit
 
