@@ -383,6 +383,25 @@ def _normalize_precision_input(precision_input):
     return refs
 
 
+def _normalize_init_precision_weights(value):
+    """Light early validation of a Predict ``init_precision_weights`` argument.
+
+    Only rank is checkable at construction time — the authoritative shape check
+    happens at build (see ``Predict.resolve_init_precision_weights``), because
+    ``precision_input`` may be assigned after construction and it is what fixes
+    the precision function's input dim.
+    """
+    if value is None:
+        return None
+    arr = np.asarray(value, dtype=np.float32)
+    if arr.ndim > 2:
+        raise ValueError(
+            "init_precision_weights must be a scalar, a (precision_input_dim,) "
+            "vector, or a (rows, precision_input_dim) matrix; got array with "
+            f"shape {arr.shape}")
+    return arr
+
+
 def _precision_source_dim(ref: NodeRef) -> int:
     """Runtime feature dim of a precision-input source array.
 
@@ -473,6 +492,24 @@ class Predict:
             (weights of the log-precision function). Default from config.
         learn_precision_bias: Whether to learn per-dimension precision offsets
             (bias of the log-precision function). Default from config.
+        init_precision_weights: Initial weights ``W_ρ`` of the log-precision
+            function ``g(W_ρ · src + b_ρ)``, the precision analogue of
+            ``init_weight``. Default ``None`` initializes them to **zeros**, so
+            the starting precision is exactly ``init_precision`` (which sets
+            ``b_ρ`` via the inverse of ``precision_activation``). The expected
+            shape is ``(rows, precision_input_dim)`` where ``rows`` is
+            ``post_dim`` when either precision-learning flag is on and ``1``
+            when both are off, and ``precision_input_dim`` is this connection's
+            ``pre_dim`` by default or the summed dims of ``precision_input``
+            sources. A scalar, a ``(precision_input_dim,)`` vector, or a
+            ``(1, precision_input_dim)`` row are broadcast across ``rows``. The
+            shape is validated at build against the resolved precision input —
+            a mismatch (e.g. weights sized for the pre when precision is keyed
+            on another layer) raises. Combine with
+            ``learn_precision_weights=False`` to *fix* a hand-designed
+            precision-gain path (e.g. keying precision on a clamped control
+            layer), matching the ``init_weight`` + ``learn_weights=False``
+            idiom for predict weights.
         error_activation: Activation applied to the raw residual
             ``post_val - prediction`` before it is used downstream (energy,
             Project/Modulate reads, logging). Defaults to ``Direct`` (identity,
@@ -559,6 +596,7 @@ class Predict:
         learn_precision=_DEFAULT,
         learn_precision_weights=_DEFAULT,
         learn_precision_bias=_DEFAULT,
+        init_precision_weights=None,
         precision_activation=_DEFAULT,
         precision_parameterization=_DEFAULT,
         precision_input_norm: bool = False,
@@ -696,6 +734,11 @@ class Predict:
         _normalize_precision_input(precision_input)  # early validation
         self.precision_input = precision_input
 
+        # Optional hand-set W_rho. Shape is validated at build, once
+        # precision_input (and hence precision_input_dim) is final.
+        self.init_precision_weights = _normalize_init_precision_weights(
+            init_precision_weights)
+
         # Compute combined pre dim (respects slicing)
         self.pre_dim = sum(
             (s[1] - s[0]) if s is not None else p.dim
@@ -748,6 +791,47 @@ class Predict:
         if refs is None:
             return self.pre_dim
         return sum(_precision_source_dim(r) for r in refs)
+
+    def resolve_init_precision_weights(self, rows: int):
+        """Validate + broadcast ``init_precision_weights`` to ``(rows, pin_dim)``.
+
+        Returns None when the user did not set one (build then uses zeros, so
+        the starting precision is exactly ``init_precision``). ``rows`` is
+        ``post_dim`` when either precision-learning flag is on, else 1.
+
+        Accepted inputs, all broadcast across ``rows``: a scalar, a
+        ``(pin_dim,)`` vector, a ``(1, pin_dim)`` row, or a full
+        ``(rows, pin_dim)`` matrix. Anything else raises, naming the resolved
+        precision-input source — the common mistake is sizing the weights for
+        the conn's pre when ``precision_input`` keys precision elsewhere.
+        """
+        arr = self.init_precision_weights
+        if arr is None:
+            return None
+        pin_dim = self.precision_input_dim
+        refs = self._resolved_precision_input()
+        src = ("its pre" if refs is None
+               else "precision_input " + ", ".join(repr(r) for r in refs))
+        name = self.label or f"Predict({self.pre_dim}->{self.post_dim})"
+
+        if arr.ndim == 0:
+            return np.full((rows, pin_dim), float(arr), dtype=np.float32)
+        if arr.ndim == 1:
+            if arr.shape[0] != pin_dim:
+                raise ValueError(
+                    f"{name}: init_precision_weights has shape {arr.shape}, but "
+                    f"the precision function reads {src} with dim {pin_dim}; a "
+                    f"1-D init must have shape ({pin_dim},)")
+            return np.broadcast_to(arr[None, :], (rows, pin_dim)).astype(np.float32)
+        if arr.shape[1] != pin_dim or arr.shape[0] not in (1, rows):
+            raise ValueError(
+                f"{name}: init_precision_weights has shape {arr.shape}, expected "
+                f"({rows}, {pin_dim}) or (1, {pin_dim}) — the precision function "
+                f"reads {src} (dim {pin_dim}) and carries {rows} output row(s) "
+                f"(post_dim={self.post_dim}, learn_precision_weights="
+                f"{self.learn_precision_weights}, learn_precision_bias="
+                f"{self.learn_precision_bias})")
+        return np.broadcast_to(arr, (rows, pin_dim)).astype(np.float32)
 
     @property
     def init_log_precision(self) -> float:
