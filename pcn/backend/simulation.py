@@ -1381,6 +1381,8 @@ def _single_pass(
     project_conns_internal: tuple = (),
     modulate_conns_internal: tuple = (),
     precisions_carry: tuple = (),
+    project_conns_value_preseed: tuple = (),
+    modulate_conns_value_preseed: tuple = (),
 ) -> Tuple[tuple, tuple]:
     """
     Single forward pass: propagate clamped values through the network sequentially
@@ -1406,6 +1408,32 @@ def _single_pass(
     new_values = list(values)
     new_errors = [jnp.zeros_like(e) for e in errors]
     new_precisions = []
+
+    if feedforward_init and (project_conns_value_preseed
+                             or modulate_conns_value_preseed):
+        # Seed-ordering fix (the todo on project_conns above): value-targeting
+        # Project/Modulate whose every pre is a HARD-CLAMPED value layer are
+        # applied BEFORE the predict loop, so a chain like
+        # ``clamped_raw -Project-> free_input -Predict-> h`` seeds ``h`` from
+        # the projected evidence instead of zeros. Conns with free/soft-
+        # clamped/error/delayed pres keep the historical after-predicts
+        # placement (their pres may be seeded by the predict loop). run_batch
+        # partitions the conns statically from data_map; each conn is applied
+        # exactly once per seed.
+        for weight_idx, conn in project_conns_value_preseed:
+            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns,
+                                   precisions=())
+            p_bias = project_biases[weight_idx] if project_biases else 0.0
+            projection = conn.apply(pre_act, project_weights[weight_idx]) + p_bias
+            updated = _write_additive(new_values[conn.post_idx], projection, conn.post_slice)
+            new_values[conn.post_idx] = _apply_mask(clamped[conn.post_idx], new_values[conn.post_idx], updated)
+        for weight_idx, conn in modulate_conns_value_preseed:
+            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns,
+                                   precisions=())
+            bias = modulate_biases[weight_idx] if modulate_biases else 0.0
+            modulation = conn.apply(pre_act, modulate_weights[weight_idx]) + bias
+            updated = _write_multiplicative(new_values[conn.post_idx], modulation, conn.post_slice)
+            new_values[conn.post_idx] = _apply_mask(clamped[conn.post_idx], new_values[conn.post_idx], updated)
 
     for i, conn in enumerate(predict_conns):
         subkey = jax.random.fold_in(key, i)
@@ -1931,6 +1959,30 @@ def run_batch(
         for c in clamped_list
     )
 
+    # Static partition of value-targeting Project/Modulate for the seed pass:
+    # conns whose every pre is a HARD-clamped (plain string data_map entry)
+    # value layer have final pre values before the predict loop runs, so
+    # _single_pass applies them FIRST — chains like clamped -> Project ->
+    # free_input -> Predict then seed from real evidence. Everything else
+    # (free / soft-clamped / error / delayed pres) keeps the historical
+    # after-predicts placement.
+    _hard_clamped_idxs = frozenset(
+        entry[0] for entry in data_map
+        if entry[0] != -1 and isinstance(entry[1], str))
+
+    def _preseedable(c):
+        # advance='timestep' conns preseed too: the seed pass IS the first
+        # frame boundary, and the historical seed loop applied them there
+        # unconditionally — excluding them would make advance='timestep'
+        # seed differently from the equivalent advance='iteration' conn.
+        return (c.pre_node_type == 0 and c.delay == 0
+                and all(p in _hard_clamped_idxs for p in c.pre_idx))
+
+    pcv_preseed = tuple(t for t in project_conns_value if _preseedable(t[1]))
+    pcv_after = tuple(t for t in project_conns_value if not _preseedable(t[1]))
+    mcv_preseed = tuple(t for t in modulate_conns_value if _preseedable(t[1]))
+    mcv_after = tuple(t for t in modulate_conns_value if not _preseedable(t[1]))
+
     # Forward pass
     errors_init = tuple(jnp.zeros((batch_size, dim)) for dim in predict_error_dims)
     # Precision-node precision_input sources need a "previous iteration"
@@ -1953,7 +2005,7 @@ def run_batch(
         modulate_weights, modulate_biases,
         precision_weights, precision_biases,
         predict_conns, project_conns, modulate_conns,
-        activation_fns, project_conns_value, modulate_conns_value,
+        activation_fns, pcv_after, mcv_after,
         is_poisson_types, key, is_stochastic,
         predict_error_activations=predict_error_activations,
         predict_precision_activations=predict_precision_activations,
@@ -1964,6 +2016,8 @@ def run_batch(
         project_conns_internal=project_conns_internal,
         modulate_conns_internal=modulate_conns_internal,
         precisions_carry=precisions_carry_init,
+        project_conns_value_preseed=pcv_preseed,
+        modulate_conns_value_preseed=mcv_preseed,
     )
 
     # Phase 2 bootstrap: pre-fill the error/precision one-step buffers so
