@@ -107,6 +107,47 @@ def test_free_pre_project_keeps_after_predicts_placement():
     np.testing.assert_allclose(got['b'], got['a'], rtol=1e-5, atol=1e-6)
 
 
+def test_gated_layer_survives_predict_blend_and_self_decay():
+    """The full gate topology: a Predict edge INTO the gated layer (a
+    generative decoder) and a -I decay self-Project. The gated layer's seed
+    must end at raw*mask — not overwritten by the prediction blend, not
+    zeroed by the seed re-application of the self-decay."""
+    D, H = 4, 3
+    W0 = np.arange(H * D, dtype=np.float32).reshape(H, D) / 10.0
+    Wg = (np.arange(D * H, dtype=np.float32).reshape(D, H) - 4.0) / 10.0
+
+    net = pcn.PCNetwork(seed=0)
+    net.config(use_bias=False)
+    with net:
+        l_raw = pcn.Layer(dim=D, activation=pcn.Direct(), label='raw')
+        l_mask = pcn.Layer(dim=D, activation=pcn.Direct(), label='mask')
+        l_x = pcn.Layer(dim=D, activation=pcn.Direct(), label='x')
+        l_h = pcn.Layer(dim=H, activation=pcn.Direct(), label='h')
+        pcn.Project(l_raw, l_x, init_weight=np.eye(D, dtype=np.float32),
+                    update_rule=pcn.NoLearning(), use_bias=False)
+        pcn.Project(l_x, l_x, init_weight=-np.eye(D, dtype=np.float32),
+                    update_rule=pcn.NoLearning(), use_bias=False)
+        pcn.Modulate(l_mask, l_x, init_weight=np.eye(D, dtype=np.float32),
+                     update_rule=pcn.NoLearning(), use_bias=False)
+        pcn.Predict(l_x, l_h, init_weight=W0)
+        pcn.Predict(l_h, l_x, init_weight=Wg)   # generative edge into the gate
+    net.build()
+
+    rng = np.random.default_rng(3)
+    raw = rng.uniform(0.1, 1.0, size=(2, D)).astype(np.float32)
+    mask = np.array([[1.0, 0.0, 0.5, 1.0],
+                     [0.0, 1.0, 1.0, 0.25]], dtype=np.float32)
+    got = _one_iter_values(
+        net, {'raw': raw, 'mask': mask},
+        data_map={l_raw: 'raw', l_mask: 'mask'},
+        records={'x': ((l_x.value,), lambda v: np.asarray(v)),
+                 'h': ((l_h.value,), lambda v: np.asarray(v))})
+
+    np.testing.assert_allclose(got['x'], raw * mask, rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(got['h'], (raw * mask) @ W0.T,
+                               rtol=1e-5, atol=1e-6)
+
+
 def test_plain_net_seed_unchanged():
     """No value-PM: the seed is the ordinary feedforward pass."""
     D, H = 4, 3

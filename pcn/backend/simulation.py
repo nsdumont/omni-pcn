@@ -1383,6 +1383,7 @@ def _single_pass(
     precisions_carry: tuple = (),
     project_conns_value_preseed: tuple = (),
     modulate_conns_value_preseed: tuple = (),
+    preseed_target_idxs: frozenset = frozenset(),
 ) -> Tuple[tuple, tuple]:
     """
     Single forward pass: propagate clamped values through the network sequentially
@@ -1484,8 +1485,11 @@ def _single_pass(
             post_val - prediction, prev_e_i, key=subkey)
         new_precisions.append(precision)
         # Set post-layer values to a soft blend of clamped input and prediction.
-        # Skipped when feedforward_init is off so non-clamped values stay at init.
-        if feedforward_init:
+        # Skipped when feedforward_init is off so non-clamped values stay at
+        # init, and for preseed-target layers, whose seed value is clamped-
+        # evidence-derived (see the preseed loop above) and must survive the
+        # predict loop intact.
+        if feedforward_init and conn.post_idx not in preseed_target_idxs:
             if conn.post_slice:
                 s, e = conn.post_slice
                 clamp_slice = clamped[conn.post_idx][:, s:e] if clamped[conn.post_idx].ndim > 1 else clamped[conn.post_idx]
@@ -1979,9 +1983,22 @@ def run_batch(
                 and all(p in _hard_clamped_idxs for p in c.pre_idx))
 
     pcv_preseed = tuple(t for t in project_conns_value if _preseedable(t[1]))
-    pcv_after = tuple(t for t in project_conns_value if not _preseedable(t[1]))
     mcv_preseed = tuple(t for t in modulate_conns_value if _preseedable(t[1]))
-    mcv_after = tuple(t for t in modulate_conns_value if not _preseedable(t[1]))
+    # Layers seeded by clamped-evidence PM are treated as evidence for the
+    # REST of the seed pass: the predict loop must not blend predictions over
+    # them, and after-predicts value-PM (e.g. a -I decay self-Project, whose
+    # job is cancelling the value carry during ITERATIONS) must not re-fire
+    # on them at the seed — otherwise a gated-input chain ends its seed at 0
+    # and the first inference iteration consumes corrupted evidence.
+    _preseed_targets = frozenset(
+        t[1].post_idx for t in (pcv_preseed + mcv_preseed)
+        if t[1].post_node_type == 0)
+    pcv_after = tuple(
+        t for t in project_conns_value if not _preseedable(t[1])
+        and not (t[1].post_node_type == 0 and t[1].post_idx in _preseed_targets))
+    mcv_after = tuple(
+        t for t in modulate_conns_value if not _preseedable(t[1])
+        and not (t[1].post_node_type == 0 and t[1].post_idx in _preseed_targets))
 
     # Forward pass
     errors_init = tuple(jnp.zeros((batch_size, dim)) for dim in predict_error_dims)
@@ -2018,6 +2035,7 @@ def run_batch(
         precisions_carry=precisions_carry_init,
         project_conns_value_preseed=pcv_preseed,
         modulate_conns_value_preseed=mcv_preseed,
+        preseed_target_idxs=_preseed_targets,
     )
 
     # Phase 2 bootstrap: pre-fill the error/precision one-step buffers so
