@@ -765,6 +765,26 @@ class Predict:
         return NodeRef(self, 'precision', owner_type='predict')
 
     @property
+    def perror(self) -> NodeRef:
+        """Reference to this connection's precision-weighted error, π ⊙ ε.
+
+        A read-only derived node — the same quantity the energy, value
+        gradients, and weight updates consume. Usable as a ``pre`` for
+        Project/Modulate (e.g. precision-weighted error highways); it cannot
+        be a ``post``. The read uses the carried error and the *effective*
+        (post-activation, post-clip) precision of the same iteration the
+        errors-routing sees; for connections with unlearned precision the
+        (batch, 1) precision broadcasts over the error dims.
+
+        Calibration note: in sum-convention setups (``init_precision=D_post``)
+        the magnitude of ``perror`` is ~D× the raw error — rescale any
+        consumer's ``init_scale`` accordingly. For *learned* precision on
+        wide layers use ``precision_activation='exp'`` and exclude precision
+        params from weight decay (see implementation.md).
+        """
+        return NodeRef(self, 'perror', owner_type='predict')
+
+    @property
     def flow_to_pre(self) -> NodeRef:
         """Gate for ascending error pathway (error -> pre value gradient)."""
         return NodeRef(self, 'flow_to_pre', owner_type='predict')
@@ -979,6 +999,11 @@ class Project:
         self._pre_list = _normalize_pre_noderefs(pre)
         # Normalize post (Layer -> layer.value)
         self.post = post.value if isinstance(post, Layer) else post
+        if self.post.node_type == 'perror':
+            raise ValueError(
+                "perror is a read-only derived node (precision * error) and "
+                "cannot be a Project/Modulate post; target the connection's "
+                ".error or .precision instead")
         # Keep .pre for backward compat (single-pre returns the NodeRef)
         self.pre = self._pre_list[0] if len(self._pre_list) == 1 else self._pre_list[0]
 
@@ -1171,6 +1196,11 @@ class Modulate:
         self._pre_list = _normalize_pre_noderefs(pre)
         # Normalize post (Layer -> layer.value)
         self.post = post.value if isinstance(post, Layer) else post
+        if self.post.node_type == 'perror':
+            raise ValueError(
+                "perror is a read-only derived node (precision * error) and "
+                "cannot be a Project/Modulate post; target the connection's "
+                ".error or .precision instead")
         # Keep .pre for backward compat
         self.pre = self._pre_list[0] if len(self._pre_list) == 1 else self._pre_list[0]
 

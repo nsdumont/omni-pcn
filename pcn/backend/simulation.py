@@ -301,6 +301,7 @@ def _apply_project_modulate_values(
     read_values=None,
     is_boundary=None,
     hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
+    precisions=(),
 ):
     """Apply Project (additive) then Modulate (multiplicative) targeting values.
 
@@ -346,7 +347,8 @@ def _apply_project_modulate_values(
 
     for weight_idx, conn in project_conns_value:
         dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
-        pre_act = conn.get_pre(read_src, errors, activation_fns, delayed_srcs=dsrc)
+        pre_act = conn.get_pre(read_src, errors, activation_fns,
+                               precisions=precisions, delayed_srcs=dsrc)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
         contribution = conn.apply(pre_act, project_weights[weight_idx]) + p_bias
         if gate_bool is not None and getattr(conn, 'advance_timestep', False):
@@ -357,7 +359,8 @@ def _apply_project_modulate_values(
 
     for weight_idx, conn in modulate_conns_value:
         dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
-        pre_act = conn.get_pre(read_src, errors, activation_fns, delayed_srcs=dsrc)
+        pre_act = conn.get_pre(read_src, errors, activation_fns,
+                               precisions=precisions, delayed_srcs=dsrc)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
         modulation = conn.apply(pre_act, modulate_weights[weight_idx]) + bias
         if gate_bool is not None and getattr(conn, 'advance_timestep', False):
@@ -380,6 +383,7 @@ def _apply_project_modulate_values_in_energy(
     activation_fns,
     project_biases=(),
     modulate_biases=(),
+    precisions=(),
 ):
     """Apply value-targeting Project/Modulate inside the energy function.
 
@@ -390,7 +394,8 @@ def _apply_project_modulate_values_in_energy(
     new_values = list(values)
 
     for weight_idx, conn in project_conns_value:
-        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns)
+        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns,
+                               precisions=precisions)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
         new_values[conn.post_idx] = _write_additive(
             new_values[conn.post_idx],
@@ -399,7 +404,8 @@ def _apply_project_modulate_values_in_energy(
             conn.post_slice)
 
     for weight_idx, conn in modulate_conns_value:
-        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns)
+        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns,
+                               precisions=precisions)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
         new_values[conn.post_idx] = _write_multiplicative(
             new_values[conn.post_idx],
@@ -417,6 +423,7 @@ def _apply_project_modulate_values_for_loss(
     activation_fns,
     project_biases=(),
     modulate_biases=(),
+    precisions=(),
 ):
     """Apply value-targeting Project/Modulate with full gradient flow.
 
@@ -427,7 +434,8 @@ def _apply_project_modulate_values_for_loss(
     new_values = list(values)
 
     for weight_idx, conn in project_conns_value:
-        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns)
+        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns,
+                               precisions=precisions)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
         new_values[conn.post_idx] = _write_additive(
             new_values[conn.post_idx],
@@ -435,7 +443,8 @@ def _apply_project_modulate_values_for_loss(
             conn.post_slice)
 
     for weight_idx, conn in modulate_conns_value:
-        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns)
+        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns,
+                               precisions=precisions)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
         new_values[conn.post_idx] = _write_multiplicative(
             new_values[conn.post_idx],
@@ -834,7 +843,8 @@ def _combined_step(
                 values, prev_errors, l_proj_w, l_mod_w,
                 project_conns_value, modulate_conns_value, activation_fns,
                 project_biases=tuple(jax.lax.stop_gradient(b) for b in project_biases),
-                modulate_biases=tuple(jax.lax.stop_gradient(b) for b in modulate_biases))
+                modulate_biases=tuple(jax.lax.stop_gradient(b) for b in modulate_biases),
+                precisions=pre_update_precisions)
 
             l_errors = []
             l_precisions = []
@@ -906,7 +916,8 @@ def _combined_step(
         project_biases=project_biases, modulate_biases=modulate_biases,
         read_values=values, is_boundary=is_boundary,
         hist=hist, tick_base=tick_base, iter_idx=iter_idx,
-        iters_per_timestep=iters_per_timestep)
+        iters_per_timestep=iters_per_timestep,
+        precisions=pre_update_precisions)
 
     # Apply params optimizer
     if isinstance(params_optimizer, optax.GradientTransformationExtraArgs):
@@ -1313,7 +1324,8 @@ def _inference_step(
         project_biases=project_biases, modulate_biases=modulate_biases,
         read_values=values, is_boundary=is_boundary,
         hist=hist, tick_base=tick_base, iter_idx=iter_idx,
-        iters_per_timestep=iters_per_timestep)
+        iters_per_timestep=iters_per_timestep,
+        precisions=precisions)
 
     return tuple(new_values), pre_errors, pre_precisions, energy_val, new_values_opt_state
 
@@ -1459,7 +1471,8 @@ def _single_pass(
     if feedforward_init:
         # Apply value-targeting Project connections (additive)
         for weight_idx, conn in project_conns_value:
-            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns)
+            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns,
+                                   precisions=tuple(new_precisions))
             p_bias = project_biases[weight_idx] if project_biases else 0.0
             projection = conn.apply(pre_act, project_weights[weight_idx]) + p_bias
             updated = _write_additive(new_values[conn.post_idx], projection, conn.post_slice)
@@ -1467,7 +1480,8 @@ def _single_pass(
 
         # Apply value-targeting Modulate connections (multiplicative)
         for weight_idx, conn in modulate_conns_value:
-            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns)
+            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns,
+                                   precisions=tuple(new_precisions))
             bias = modulate_biases[weight_idx] if modulate_biases else 0.0
             modulation = conn.apply(pre_act, modulate_weights[weight_idx]) + bias
             updated = _write_multiplicative(new_values[conn.post_idx], modulation, conn.post_slice)
@@ -1648,18 +1662,25 @@ def run_batch(
         float(getattr(layer, 'activation_temperature', 1.0)) for layer in structure.layers)
     activation_winners = tuple(
         int(getattr(layer, 'activation_num_winners', 0)) for layer in structure.layers)
+    activation_thresholds = tuple(
+        tuple(getattr(layer, 'activation_thresholds', ())) for layer in structure.layers)
     # Apply input temperature as activation(x / T); T==1.0 is the plain fn.
     # NWTA layers (num_winners > 0) bake the winner count into the closure,
-    # mirroring how Softmax bakes in its temperature.
-    def _build_activation_fn(t, T, nw):
+    # mirroring how Softmax bakes in its temperature. ThresholdRelu layers
+    # (non-empty thresholds) bake the per-neuron subtractive thresholds:
+    # f(x) = max(x - theta, 0).
+    def _build_activation_fn(t, T, nw, thr):
+        if thr:
+            return lambda x, _a=jnp.asarray(thr): jnp.maximum(x - _a, 0)
         if nw > 0:
             return lambda x, _nw=nw: _nwta(x, _nw)
         if T == 1.0:
             return ACTIVATIONS[t]
         return lambda x, _t=t, _T=T: ACTIVATIONS[_t](x / _T)
     activation_fns = tuple(
-        _build_activation_fn(t, T, nw)
-        for t, T, nw in zip(activation_types, activation_temps, activation_winners))
+        _build_activation_fn(t, T, nw, thr)
+        for t, T, nw, thr in zip(activation_types, activation_temps,
+                                 activation_winners, activation_thresholds))
     is_poisson_types = tuple(layer.is_poisson for layer in structure.layers)
     # Per-layer Activation instances are only threaded into the prediction
     # pre-activation when at least one layer is stochastic; otherwise the

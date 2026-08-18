@@ -158,16 +158,21 @@ def run_bptt_batch(
         float(getattr(layer, 'activation_temperature', 1.0)) for layer in structure.layers)
     activation_winners = tuple(
         int(getattr(layer, 'activation_num_winners', 0)) for layer in structure.layers)
+    activation_thresholds = tuple(
+        tuple(getattr(layer, 'activation_thresholds', ())) for layer in structure.layers)
 
-    def _build_activation_fn(t, T, nw):
+    def _build_activation_fn(t, T, nw, thr):
+        if thr:
+            return lambda x, _a=jnp.asarray(thr): jnp.maximum(x - _a, 0)
         if nw > 0:
             return lambda x, _nw=nw: _nwta(x, _nw)
         if T == 1.0:
             return ACTIVATIONS[t]
         return lambda x, _t=t, _T=T: ACTIVATIONS[_t](x / _T)
     activation_fns = tuple(
-        _build_activation_fn(t, T, nw)
-        for t, T, nw in zip(activation_types, activation_temps, activation_winners))
+        _build_activation_fn(t, T, nw, thr)
+        for t, T, nw, thr in zip(activation_types, activation_temps,
+                                 activation_winners, activation_thresholds))
     is_poisson_types = tuple(layer.is_poisson for layer in structure.layers)
     _layer_acts = layer_activations if any(
         getattr(a, 'needs_key', False) for a in layer_activations) else ()

@@ -102,6 +102,58 @@ class Relu(Activation):
         return jnp.maximum(x, 0)
 
 
+class ThresholdRelu(Activation):
+    """Rectified-linear neuron with a per-neuron (or shared) firing threshold.
+
+    ``f(x)_i = max(x_i - theta_i, 0)`` — the subtractive-threshold
+    (variable-rheobase) rectified neuron. Above threshold the gradient is
+    identical to :class:`Relu`; below it the neuron is silent.
+
+    ``thresholds`` may be a scalar (one shared threshold) or a length-``dim``
+    sequence (one threshold per neuron). It is stored as a tuple of floats so
+    instances stay hashable / JIT-static.
+
+    Like :class:`Softmax`'s ``temperature`` and :class:`NWTA`'s
+    ``num_winners``, the thresholds are carried on the :class:`LayerSpec`
+    (``activation_thresholds``) and baked into the backend's per-layer
+    activation closure — so per-neuron thresholds apply to **layer
+    activations**. In the other activation slots (post-transforms, precision
+    parameterizations, error activations) the static :meth:`fn` falls back to
+    the plain ReLU (theta = 0).
+
+    Args:
+        thresholds: Scalar or per-neuron sequence of firing thresholds.
+    """
+    type_id = 14
+    init_type = 'he'
+    init_scale = jnp.sqrt(2)
+
+    def __init__(self, thresholds=0.0):
+        try:
+            thr = tuple(float(t) for t in thresholds)
+        except TypeError:
+            thr = (float(thresholds),)
+        if not thr:
+            thr = (0.0,)
+        self.thresholds = thr
+
+    @staticmethod
+    def fn(x):
+        # Fallback (post-transform / precision / error paths): plain ReLU.
+        # The layer path uses the thresholds-aware closure built in the
+        # backend.
+        return jnp.maximum(x, 0)
+
+    def apply(self, x, prev=None):
+        return jnp.maximum(x - jnp.asarray(self.thresholds), 0)
+
+    def _state(self):
+        return ('ThresholdRelu', self.thresholds)
+
+    def __repr__(self):
+        return f"ThresholdRelu(thresholds={self.thresholds})"
+
+
 class Softmax(Activation):
     """f(x)_i = exp(x_i / T) / sum_j exp(x_j / T) along the last axis.
 
@@ -554,6 +606,7 @@ _ACTIVATION_CLASSES = (
     LayerNorm,   # 11
     NWTA,        # 12
     HardTanh,    # 13
+    ThresholdRelu,  # 14
 )
 
 # Canonical activation function tuple, indexed by type_id. Imported by the
@@ -565,6 +618,8 @@ ACTIVATION_REGISTRY = {
     "direct": Direct,
     "linear": Direct,  # alias — used by 'linear' / 'linear-<name>' transforms
     "relu": Relu,
+    "threshold_relu": ThresholdRelu,
+    "thresholdrelu": ThresholdRelu,
     "softmax": Softmax,
     "tanh": Tanh,
     "hard_tanh": HardTanh,

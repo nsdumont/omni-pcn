@@ -431,6 +431,15 @@ class PCNetwork:
 
     def _build_structure(self) -> NetworkStructure:
         """Create the static NetworkStructure."""
+        def _activation_thresholds(layer):
+            thr = tuple(
+                float(t) for t in getattr(layer.activation, 'thresholds', ()))
+            if thr and len(thr) not in (1, layer.dim):
+                raise ValueError(
+                    f"Layer '{layer.label}': activation thresholds length "
+                    f"{len(thr)} must be 1 (shared) or match dim {layer.dim}")
+            return thr
+
         layer_specs = tuple(
             LayerSpec(
                 dim=layer.dim,
@@ -442,6 +451,7 @@ class PCNetwork:
                 dropout_prob=getattr(layer, 'dropout_prob', 0.0),
                 activation_temperature=float(getattr(layer.activation, 'temperature', 1.0)),
                 activation_num_winners=int(getattr(layer.activation, 'num_winners', 0)),
+                activation_thresholds=_activation_thresholds(layer),
             )
             for layer in self._layers
         )
@@ -758,8 +768,11 @@ class PCNetwork:
             getattr(getattr(c, 'precision_activation', None), 'has_memory', False)
             for c in self._predict_conns)
         _all_pm_specs = project_specs + modulate_specs
-        _err_pre = any(getattr(s, 'pre_node_type', 0) == 1 for s in _all_pm_specs)
-        _prec_pre = any(getattr(s, 'pre_node_type', 0) == 2 for s in _all_pm_specs)
+        # perror (5) reads pi * eps — it consumes BOTH carries.
+        _err_pre = any(getattr(s, 'pre_node_type', 0) in (1, 5)
+                       for s in _all_pm_specs)
+        _prec_pre = any(getattr(s, 'pre_node_type', 0) in (2, 5)
+                        for s in _all_pm_specs)
         _err_target = bool(project_conns_internal or modulate_conns_internal)
         _prec_target = bool(project_conns_precision or modulate_conns_precision)
         _err_flow = any(
@@ -1380,6 +1393,8 @@ class PCNetwork:
             g.attrs['dropout_prob'] = float(spec.dropout_prob)
             g.attrs['activation_temperature'] = float(spec.activation_temperature)
             g.attrs['activation_num_winners'] = int(spec.activation_num_winners)
+            g.attrs['activation_thresholds'] = np.asarray(
+                spec.activation_thresholds, dtype=np.float64)
 
         # Predict connections
         pg = sg.create_group('predict_conns')

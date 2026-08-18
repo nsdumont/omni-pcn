@@ -135,6 +135,12 @@ class LayerSpec(NamedTuple):
     # ``activation_temperature``. Carried here so it participates in the
     # static NetworkStructure hash (correct JIT cache keys).
     activation_num_winners: int = 0
+    # Per-neuron (or shared, length-1) subtractive thresholds for a
+    # ThresholdRelu layer activation: f(x) = max(x - theta, 0). Empty tuple
+    # means "not a ThresholdRelu layer". Baked into the backend's per-layer
+    # activation closure like ``activation_num_winners``; a tuple of floats so
+    # it participates in the static NetworkStructure hash.
+    activation_thresholds: tuple = ()
 
 
 class PredictConnSpec(NamedTuple):
@@ -467,6 +473,12 @@ def _pm_get_pre(pre_idx, pre_node_type, values, errors, activation_fns,
             arr = activation_fns[idx](base)
         elif pre_node_type == 1:  # error nodes (identity activation)
             arr = errors[idx]
+        elif pre_node_type == 5:  # perror: precision-weighted error, pi * eps
+            # Derived read-only view; the effective (post-activation,
+            # post-clip) precision broadcasts over the error dims when the
+            # conn carries an unlearned (batch, 1) precision. unit_precision
+            # conns store a ones precision, so the product stays correct.
+            arr = precisions[idx] * errors[idx]
         else:  # pre_node_type == 2, precision nodes
             arr = precisions[idx]
         sl = pre_slices[k] if pre_slices else None

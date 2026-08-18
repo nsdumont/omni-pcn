@@ -76,7 +76,7 @@ class NodeRef:
     def node_type_id(self) -> int:
         """Numeric ID for the node type (used in backend)."""
         return {'value': 0, 'error': 1, 'precision': 2,
-                'flow_to_pre': 3, 'flow_to_post': 4}[self.node_type]
+                'flow_to_pre': 3, 'flow_to_post': 4, 'perror': 5}[self.node_type]
 
     @property
     def activation(self):
