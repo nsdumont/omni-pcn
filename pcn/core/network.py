@@ -479,8 +479,10 @@ class PCNetwork:
 
         # A connection's precision is provably the constant 1.0 (so the backend
         # can fold it out of the inference hot loop) only when nothing can make
-        # it vary: not learned, init 1.0, a stateless precision activation, and
-        # no precision-targeting Project/Modulate anywhere in the graph.
+        # it vary: not learned, init 1.0, no hand-set W_rho (which makes
+        # precision a live function of its input even when frozen), a stateless
+        # precision activation, and no precision-targeting Project/Modulate
+        # anywhere in the graph.
         _has_prec_routing = any(
             getattr(c, 'post_node_type', 0) == 2
             for c in (self._project_conns + self._modulate_conns))
@@ -491,6 +493,7 @@ class PCNetwork:
                 not conn.learn_precision_weights
                 and not conn.learn_precision_bias
                 and float(getattr(conn, 'init_precision', 1.0)) == 1.0
+                and getattr(conn, 'init_precision_weights', None) is None
                 and not _has_prec_routing
                 and not getattr(pact, 'has_memory', False)
                 and not getattr(pact, 'needs_key', False)
@@ -1150,12 +1153,17 @@ class PCNetwork:
             else:
                 bias_val = init_p
 
-            if not conn.learn_precision_weights and not conn.learn_precision_bias:
-                pw = jnp.zeros((1, pin_dim), dtype=jnp.float32)
-                pb = jnp.full(1, bias_val, dtype=jnp.float32)
-            else:
-                pw = jnp.zeros((post_dim, pin_dim), dtype=jnp.float32)
-                pb = jnp.full(post_dim, bias_val, dtype=jnp.float32)
+            # Rows: a conn with both precision-learn flags off carries a single
+            # broadcast row; otherwise one row per post dim.
+            rows = (1 if not conn.learn_precision_weights
+                    and not conn.learn_precision_bias else post_dim)
+            # W_rho defaults to zeros so the starting precision is exactly
+            # init_precision; ``init_precision_weights`` overrides it (validated
+            # + broadcast against the resolved precision input dim).
+            user_pw = conn.resolve_init_precision_weights(rows)
+            pw = (jnp.zeros((rows, pin_dim), dtype=jnp.float32) if user_pw is None
+                  else jnp.asarray(user_pw, dtype=jnp.float32))
+            pb = jnp.full(rows, bias_val, dtype=jnp.float32)
             precision_weights.append(pw)
             precision_biases.append(pb)
 
