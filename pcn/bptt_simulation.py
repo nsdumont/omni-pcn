@@ -170,7 +170,7 @@ class BPTTSimulation(Simulation):
                     update_precision=self.update_precision,
                     remat=self.remat,
                     spatial_neighborhoods=getattr(self.net, 'spatial_neighborhoods', ()),
-                    predict_weight_masks=getattr(self.net, 'predict_weight_masks', ()),
+                    predict_weight_masks=self.net.donatable_weight_masks('predict'),
                     predict_error_activations=getattr(self.net, 'predict_error_activations', ()),
                     predict_precision_activations=getattr(self.net, 'predict_precision_activations', ()),
                     layer_activations=getattr(self.net, 'layer_activations', ()),

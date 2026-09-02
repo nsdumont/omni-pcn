@@ -15,8 +15,15 @@ are off by default.
 Invertibility: the ON/OFF split is lossless (``s = ON − OFF``) and the DoG is
 inverted by the bank's Wiener least-squares solve, so ``decode`` reconstructs
 band-pass image content well (DC is not represented by a zero-DC DoG — expected).
-The Gabor channels are kept signed but are redundant for reconstruction in v1; a
-joint least-squares inverse that also uses them is a documented future refinement.
+Measured on raw STL-10 the legacy path is lossless up to that single scalar:
+``r = 1.000`` and 58 dB after one global gain+offset fit, while the un-rescaled
+output sits at 7.7 dB purely because the mean is missing. The Gabor channels are
+kept signed but are redundant for reconstruction, and no joint least-squares
+inverse can do better: every composite kernel is ``G_k · DoG`` in Fourier, so the
+whole bank shares the DoG's DC null.
+
+In the v2 encoder the band-pass form pathway is crossed over with the low-pass
+magno/chroma pathway where that is safe — see :class:`ParallelPathways`.
 """
 
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -333,18 +340,38 @@ class ParallelPathways(SensoryTransform):
     *chroma* (blurred opponent) pathways. Every sub-transform must preserve the
     spatial shape ``(H,W)``.
 
-    ``inverse`` reconstructs each input slice from the pathway flagged
-    ``invertible`` (later pathways win on overlap); non-invertible pathways (the
-    phase-discarding form pathway) contribute nothing, so ``decode`` recovers a
-    blurred-color approximation — honest for a complex-cell readout.
+    Pathway dict keys: ``in_start``, ``in_len``, ``transform``, and the optional
+    flags ``invertible`` (this pathway's inverse reconstructs its input slice)
+    and ``lowpass`` (its ``_forward`` is a low-pass operator, usable as the
+    crossover's blur — see below).
+
+    ``inverse`` has two modes:
+
+    - ``crossover=False`` (default): each input slice is reconstructed from the
+      pathway flagged ``invertible`` (later pathways win on overlap);
+      non-invertible pathways contribute nothing, so ``decode`` recovers a
+      blurred-colour approximation — honest for a phase-discarding readout.
+    - ``crossover=True``: the band-pass (non-``invertible``) pathway is inverted
+      too and crossed over with the ``lowpass`` pathway on the same slice,
+      ``x̂ = f − blur(f) + low``. This keeps the form pathway's detail *and* the
+      low frequencies (incl. the DC a zero-mean DoG drops) without counting the
+      low band twice. A slice fed only by a band-pass pathway falls back to that
+      pathway's inverse alone (DC-free, but far better than zeros).
+
+    Only enable ``crossover`` when the band-pass pathway's inverse is actually
+    usable: it must not be phase-discarding (a ``ChannelSelect`` down to complex
+    energy inverts to zeros) and nothing downstream may resample it (pooling then
+    nearest-upsampling band-pass channels is blocky, measurably *worse* than the
+    plain low-pass answer). :class:`VisualInput` applies both guards for you.
     """
 
     def __init__(self, spatial_shape: Tuple[int, int], in_channels: int,
-                 pathways: List[Dict]):
+                 pathways: List[Dict], crossover: bool = False):
         h, w = spatial_shape
         self.in_shape = (in_channels, h, w)
         self.out_shape = (sum(p['transform'].out_shape[0] for p in pathways), h, w)
         self.pathways = pathways
+        self.crossover = bool(crossover)
 
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
         outs = []
@@ -354,15 +381,46 @@ class ParallelPathways(SensoryTransform):
         return jnp.concatenate(outs, axis=1)
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
-        recon = jnp.zeros((y.shape[0],) + self.in_shape)
+        # Collect each pathway's contribution keyed by the input slice it feeds,
+        # keeping band-pass ("form") and low-pass contributions apart. `order`
+        # preserves first-appearance pathway order so overlapping-but-different
+        # slices resolve the same way they always have (later pathway wins).
+        band: Dict[Tuple[int, int], jnp.ndarray] = {}
+        low: Dict[Tuple[int, int], jnp.ndarray] = {}
+        lowop: Dict[Tuple[int, int], SensoryTransform] = {}
+        order: List[Tuple[int, int]] = []
         off = 0
         for p in self.pathways:
             co = p['transform'].out_shape[0]
             ys = y[:, off:off + co]
             off += co
+            key = (p['in_start'], p['in_len'])
             if p.get('invertible', False):
+                low[key] = p['transform']._inverse(ys)      # later pathway wins
+                if p.get('lowpass', False):
+                    lowop[key] = p['transform']
+            elif self.crossover:
                 xs = p['transform']._inverse(ys)
-                recon = recon.at[:, p['in_start']:p['in_start'] + p['in_len']].set(xs)
+                band[key] = band[key] + xs if key in band else xs
+            else:
+                continue
+            if key not in order:
+                order.append(key)
+
+        recon = jnp.zeros((y.shape[0],) + self.in_shape)
+        for key in order:
+            if key in band and key in lowop:
+                # keep the band-pass detail, take the low frequencies (incl. DC)
+                # from the blur pathway -- no double-counted low band
+                f = band[key]
+                xs = f - lowop[key]._forward(f) + low[key]
+            elif key in band and key not in low:
+                xs = band[key]                              # DC-free, still useful
+            elif key in low:
+                xs = low[key]
+            else:
+                continue
+            recon = recon.at[:, key[0]:key[0] + key[1]].set(xs)
         return recon
 
 
@@ -391,6 +449,17 @@ class VisualInput(SensoryInput):
     opponent) pathways so mean luminance/color survive. The pooled output
     ``(C, H/downsample, W/downsample)`` is *smaller* than the raw image. Call
     :meth:`fit` on a calibration batch to freeze the per-channel normalization.
+
+    ``decode`` quality depends on the pathway settings. With ``downsample=1`` and
+    ``complex_cells=False`` the form pathway is inverted and crossed over with the
+    blur pathway (see :class:`ParallelPathways`), which recovers the image almost
+    exactly (measured on raw STL-10: ~89 dB gray, ~35 dB RGB — the RGB cap is the
+    deliberately blurred chroma pathway). With ``complex_cells=True`` phase is
+    genuinely discarded and with ``downsample > 1`` the band-pass channels are
+    resampled, so both fall back to a low-pass-only reconstruction (~22 dB): a
+    blurred-colour approximation, honest for a complex-cell readout. ``decode``
+    is therefore a readout of the *reconstructible* pathways, not a measure of how
+    much the features retain.
 
     Args:
         in_shape: raw image shape, ``(H, W)`` / ``(1, H, W)`` (gray) or
@@ -491,13 +560,19 @@ class VisualInput(SensoryInput):
             dict(in_start=0, in_len=1, transform=form, invertible=False)]
 
         if keep_lowpass:                                 # magnocellular luma DC
-            pathways.append(dict(in_start=0, in_len=1, invertible=True,
+            pathways.append(dict(in_start=0, in_len=1, invertible=True, lowpass=True,
                                  transform=GaussianBlur(hw, 1, lowpass_sigma)))
         if color == 'opponent':                          # chroma (low bandwidth)
-            pathways.append(dict(in_start=1, in_len=2, invertible=True,
+            pathways.append(dict(in_start=1, in_len=2, invertible=True, lowpass=True,
                                  transform=GaussianBlur(hw, 2, lowpass_sigma)))
 
-        stages.append(ParallelPathways(hw, pathway_in, pathways))
+        # Invert the band-pass form pathway too (crossing it over with the blur
+        # pathway) only where its inverse survives: `complex_cells` discards phase
+        # so the form inverse is identically zero, and `downsample > 1` puts a
+        # pool/nearest-upsample in front of it, which is measurably worse than
+        # just taking the low-pass answer. See ParallelPathways.
+        crossover = (downsample == 1) and not complex_cells
+        stages.append(ParallelPathways(hw, pathway_in, pathways, crossover=crossover))
         c = stages[-1].out_shape[0]
         if contrast_norm:
             stages.append(DivisiveNormalization(hw, c))

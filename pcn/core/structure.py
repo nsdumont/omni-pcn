@@ -13,6 +13,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from .activations import ACTIVATIONS
+from .sparse import SparseWeight, sparse_matmul
 
 
 # ============================================================================
@@ -36,7 +37,8 @@ def _apply_transform(pre_act, W, b=None, pre_value=None,
 
     Args:
         pre_act: (batch, pre_dim) activated pre values.
-        W: Weight matrix. Dense: (post_dim, pre_dim).
+        W: Weight matrix. Dense: (post_dim, pre_dim), or a ``SparseWeight``
+           (CSR/CSC, ``sparse=True``) for the dense-layout paths.
            Conv: (out_channels, in_channels, kH, kW).
         b: Optional bias. Dense: (post_dim,). Conv: (out_channels,).
         pre_value: Raw pre value for residual connections.
@@ -84,6 +86,17 @@ def _apply_transform(pre_act, W, b=None, pre_value=None,
                 y = lax.reduce_window(
                     y, 0.0, lax.add, window, strides, 'VALID') / (pH * pW)
         out = y.reshape(B, -1)
+    elif isinstance(W, SparseWeight):
+        # CSR/CSC weight (``sparse=True``): x @ W.T through the custom-VJP
+        # cuSPARSE kernel; alpha / residual / bias applied around it exactly
+        # as in the dense branches below.
+        out = sparse_matmul(W, pre_act)
+        if alpha != 1.:
+            out = alpha * out
+        if is_res:
+            out = out + pre_value
+        elif b is not None:
+            out = out + b
     elif is_res:
         out = jnp.dot(pre_act, alpha * W.T) + pre_value
     else:
@@ -262,6 +275,9 @@ class PredictConnSpec(NamedTuple):
     delay: int = 0
     delay_unit_ts: bool = False
     pre_buffer_indices: tuple = ()
+    # ``sparse=True``: the weight is a SparseWeight (CSR/CSC). The index set
+    # is the mask, so the backend skips the post-update band/mask multiply.
+    is_sparse: bool = False
 
     def apply(self, pre_act, W, b=None, pre_value=None):
         """Apply the connection transform."""
@@ -578,6 +594,9 @@ class ProjectConnSpec(NamedTuple):
     delay: int = 0
     delay_unit_ts: bool = False
     pre_buffer_indices: tuple = ()
+    # ``sparse=True``: the weight is a SparseWeight (CSR/CSC). The index set
+    # is the mask, so the backend skips the post-update band/mask multiply.
+    is_sparse: bool = False
 
     def apply(self, pre_act, W):
         """Apply the connection transform (no bias)."""
@@ -662,6 +681,9 @@ class ModulateConnSpec(NamedTuple):
     delay: int = 0
     delay_unit_ts: bool = False
     pre_buffer_indices: tuple = ()
+    # ``sparse=True``: the weight is a SparseWeight (CSR/CSC). The index set
+    # is the mask, so the backend skips the post-update band/mask multiply.
+    is_sparse: bool = False
 
     def apply(self, pre_act, W):
         """Apply the connection transform (no bias)."""

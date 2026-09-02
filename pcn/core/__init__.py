@@ -10,6 +10,7 @@ This module provides the user-facing API for defining predictive coding networks
 """
 
 from .state import NetworkState, NetworkParams
+from .sparse import SparseWeight
 from .structure import (
     NetworkStructure,
     LayerSpec,
@@ -29,6 +30,7 @@ __all__ = [
     # State and params
     'NetworkState',
     'NetworkParams',
+    'SparseWeight',
     # Structure
     'NetworkStructure',
     'LayerSpec',

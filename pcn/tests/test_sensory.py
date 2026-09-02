@@ -12,7 +12,8 @@ import pcn
 from pcn.core.sensory.base import SensoryTransform, Sequential
 from pcn.core.sensory.vision import (
     DoGCenterSurround, GaborBank, DivisiveNormalization, ComplexEnergy,
-    ColorOpponent, GaussianBlur, SpatialPool, ChannelStandardize)
+    ColorOpponent, GaussianBlur, SpatialPool, ChannelStandardize,
+    ParallelPathways)
 from pcn.core.sensory.audio import (
     MelPower, PowerCompression, LateralInhibition, LeakyIntegrator, STRFBank)
 
@@ -102,6 +103,71 @@ class TestEncoderStages:
         y = jnp.asarray(np.random.RandomState(1).randn(2, 5, 4, 4).astype(np.float32))
         # avg-pool inverse is nearest-upsample; pooling it back is the identity
         assert jnp.allclose(sp.forward(sp.inverse(y)), y, atol=1e-4)
+
+    def test_parallel_pathways_crossover_recovers_the_image(self):
+        """crossover=True must beat the low-pass-only inverse by a wide margin.
+
+        A band-pass form pathway (DoG->Gabor) beside a blurred-luma pathway: the
+        default inverse can only return the blur, the crossover keeps the form
+        pathway's detail *and* the DC.
+        """
+        hw = (32, 32)
+        form = Sequential([DoGCenterSurround(hw), GaborBank(hw)])
+        blur = GaussianBlur(hw, 1, sigma=2.0)
+        paths = [dict(in_start=0, in_len=1, transform=form, invertible=False),
+                 dict(in_start=0, in_len=1, transform=blur,
+                      invertible=True, lowpass=True)]
+        rng = np.random.RandomState(0)
+        x = jnp.asarray(rng.rand(2, 1, *hw).astype(np.float32))
+
+        pp_low = ParallelPathways(hw, 1, paths)                  # default: off
+        pp_x = ParallelPathways(hw, 1, paths, crossover=True)
+        assert pp_low.crossover is False and pp_x.crossover is True
+        assert pp_low.forward(x).shape == pp_x.forward(x).shape
+
+        err_low = float(jnp.mean((pp_low.inverse(pp_low.forward(x)) - x) ** 2))
+        err_x = float(jnp.mean((pp_x.inverse(pp_x.forward(x)) - x) ** 2))
+        assert err_x < err_low / 100.0                            # ~1e-9 vs ~4e-3
+
+    def test_parallel_pathways_crossover_band_pass_only_slice(self):
+        """A slice fed only by the band-pass pathway falls back to its inverse.
+
+        Without crossover that slice is all zeros; with it we get the DC-free
+        reconstruction, which correlates near-perfectly with the input.
+        """
+        hw = (32, 32)
+        form = Sequential([DoGCenterSurround(hw), GaborBank(hw)])
+        paths = [dict(in_start=0, in_len=1, transform=form, invertible=False)]
+        x = jnp.asarray(np.random.RandomState(1).rand(2, 1, *hw).astype(np.float32))
+
+        off = ParallelPathways(hw, 1, paths).inverse(
+            ParallelPathways(hw, 1, paths).forward(x))
+        assert jnp.allclose(off, 0.0)                             # nothing to invert
+        pp = ParallelPathways(hw, 1, paths, crossover=True)
+        assert _corr(pp.inverse(pp.forward(x)), x) > 0.99
+
+    def test_visual_input_crossover_guards(self):
+        """VisualInput enables the crossover only where it is measurably better."""
+        net = pcn.PCNetwork(seed=0)
+        with net:
+            plain = pcn.VisualInput(in_shape=(1, 32, 32), color='gray',
+                                    downsample=1, keep_lowpass=True)
+            pooled = pcn.VisualInput(in_shape=(1, 32, 32), color='gray',
+                                     downsample=2, keep_lowpass=True)
+            phaseless = pcn.VisualInput(in_shape=(1, 32, 32), color='gray',
+                                        downsample=1, keep_lowpass=True,
+                                        complex_cells=True)
+        def pp(vi):
+            return [s for s in vi.transform.stages
+                    if isinstance(s, ParallelPathways)][0]
+        assert pp(plain).crossover is True
+        assert pp(pooled).crossover is False       # pooled band-pass is blocky
+        assert pp(phaseless).crossover is False    # form inverse is identically 0
+
+        # and the enabled case really does reconstruct
+        x = jnp.asarray(np.random.RandomState(2).rand(2, 32 * 32).astype(np.float32))
+        rec = plain.decode(plain.encode(x))
+        assert _corr(rec, x) > 0.999
 
     def test_spatial_pool_requires_divisor(self):
         with pytest.raises(ValueError):

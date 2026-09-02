@@ -57,6 +57,11 @@ class BackpropSimulation:
         self.net = net
         self.objective_fn = objective_fn
         self.predict_weights = tuple(net.params.predict_weights)
+        from .core.sparse import SparseWeight
+        if any(isinstance(w, SparseWeight) for w in self.predict_weights):
+            raise NotImplementedError(
+                "BackpropSimulation does not support sparse (sparse=True) "
+                "predict weights; use Simulation or BPTTSimulation.")
         self.optimizer = optax.adam(learning_rate)
         self.opt_state = self.optimizer.init(self.predict_weights)
 

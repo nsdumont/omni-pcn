@@ -24,6 +24,14 @@ All connection types accept a ``transformation`` parameter:
 - 'masked-<activation>': same as 'masked' but the masked matmul is wrapped in
     a post-nonlinearity, ``g(W f(pre) + b)`` — combines the 'masked' and
     'linear-<activation>' semantics (e.g. ``'masked-sigmoid'``).
+- ``sparse=True | 'auto'`` (any of 'masked', 'masked-<activation>',
+    'banded{N}', or 'linear' + ``weight_mask``): store the weight as a
+    ``SparseWeight`` (CSR/CSC) instead of a dense matrix times a mask.
+    ``weight_mask`` may then also be a ``scipy.sparse`` matrix, a
+    ``jax.experimental.sparse`` BCOO/BCSR, or a ``(rows, cols)`` tuple of
+    index arrays. 'auto' resolves at ``build()`` (sparse iff density <= 5%
+    and post*pre >= 2**20); on Metal the dense path is used unless
+    ``PCN_SPARSE_ON_METAL=1``. See ``pcn.core.sparse``.
 
 Predict, Project, and Modulate can all take a *list* for ``pre``,
 in which case the pre values are concatenated before the transform.
@@ -37,6 +45,7 @@ import numpy as np
 from .layer import Layer, NodeRef
 from .learning_rules import LearningRule, Hebbian
 from .activations import Activation, Direct, activation_from_name
+from .sparse import mask_to_indices, band_indices, indices_to_dense_mask, is_index_mask
 from ..config import _DEFAULT
 
 
@@ -167,9 +176,30 @@ def _attach_kernel_mask(obj, weight_mask):
     obj.weight_mask = mask
 
 
+def _attach_dense_mask(obj, weight_mask, post_dim, pre_dim, sparse):
+    """Mark ``obj`` masked. Without ``sparse`` the mask is validated and
+    stored densely (index-format masks are densified); with ``sparse`` only
+    the index set is kept (built by the caller) — densified only on fallback."""
+    obj.is_masked = True
+    if sparse:
+        obj.weight_mask = None
+        return
+    if is_index_mask(weight_mask):
+        rows, cols = mask_to_indices(weight_mask, (post_dim, pre_dim))
+        obj.weight_mask = indices_to_dense_mask(rows, cols, (post_dim, pre_dim))
+        return
+    mask = np.asarray(weight_mask, dtype=np.float32)
+    if mask.shape != (post_dim, pre_dim):
+        raise ValueError(
+            f"weight_mask shape {mask.shape} does not match expected "
+            f"({post_dim}, {pre_dim}).")
+    obj.weight_mask = mask
+
+
 def _setup_transform(obj, transformation, pre_dim, post_dim,
                      kernel_size=None, input_shape=None,
-                     stride=None, padding=None, weight_mask=None):
+                     stride=None, padding=None, weight_mask=None,
+                     sparse=False):
     """Parse a transformation string and set transform attributes on ``obj``.
 
     Sets: ``is_conv``, ``is_transconv``, ``n_bands``, ``is_masked``,
@@ -196,13 +226,20 @@ def _setup_transform(obj, transformation, pre_dim, post_dim,
     obj.is_transconv = False
     obj.is_masked = False
     obj.weight_mask = None
+    obj.is_sparse = False          # resolved at build() from sparse_mode
+    obj.sparse_mode = False        # False | True | 'auto'
+    obj.sparse_indices = None      # (rows, cols) numpy int64, row-major sorted
     obj.post_activation_type_id = 0  # Direct by default
+    if sparse not in (False, True, 'auto'):
+        raise ValueError(f"sparse= must be False, True or 'auto', got {sparse!r}")
     obj.pool_type = 0                # 0 = none, 1 = max, 2 = avg
     obj.pool_size = ()
     obj.pool_stride = ()
 
     if transformation == 'linear':
-        pass
+        if weight_mask is not None:
+            # 'linear' + weight_mask == 'masked'
+            _attach_dense_mask(obj, weight_mask, post_dim, pre_dim, sparse)
     elif transformation.startswith('linear-'):
         name = transformation[len('linear-'):]
         try:
@@ -283,19 +320,35 @@ def _setup_transform(obj, transformation, pre_dim, post_dim,
             raise ValueError(
                 f"'{transformation}' transformation requires a weight_mask "
                 f"argument of shape ({post_dim}, {pre_dim}).")
-        mask = np.asarray(weight_mask, dtype=np.float32)
-        if mask.shape != (post_dim, pre_dim):
-            raise ValueError(
-                f"weight_mask shape {mask.shape} does not match expected "
-                f"({post_dim}, {pre_dim}).")
-        obj.is_masked = True
-        obj.weight_mask = mask
+        _attach_dense_mask(obj, weight_mask, post_dim, pre_dim, sparse)
     else:
         raise ValueError(
             f"Unknown transformation '{transformation}'. "
             f"Choices: 'linear', 'linear-<activation>', 'conv', "
             f"'conv-maxpool[N]', 'conv-avgpool[N]', 'transconv', "
             f"'banded{{N}}', 'masked', 'masked-<activation>'.")
+
+    if sparse:
+        # Sparse (CSR/CSC) storage: the sparsity structure is the mask. Only
+        # the index set is kept here; ``PCNetwork.build()`` resolves 'auto' /
+        # the platform gate into ``obj.is_sparse`` and densifies on fallback.
+        if obj.is_conv or obj.is_transconv:
+            raise ValueError(
+                "sparse= is not supported for conv/transconv transformations "
+                "(kernels are already compact).")
+        if obj.is_masked:
+            rows, cols = mask_to_indices(weight_mask, (post_dim, pre_dim))
+        elif obj.n_bands > 0:
+            rows, cols = band_indices(post_dim, pre_dim, obj.n_bands)
+        else:
+            raise ValueError(
+                "sparse= requires a sparsity structure: use transformation="
+                "'masked' / 'masked-<activation>' / 'banded{N}', or 'linear' "
+                "with a weight_mask.")
+        if rows.size == 0:
+            raise ValueError("sparse= on an empty weight_mask (no nonzero entries).")
+        obj.sparse_indices = (rows, cols)
+        obj.sparse_mode = sparse
 
 
 # ============================================================================
@@ -444,6 +497,11 @@ class Predict:
             in a post-nonlinearity ``g(W f(x) + b)``. ``'masked'`` requires the
             ``weight_mask`` argument.
         kernel_size, input_shape, stride, padding: Required for conv/transconv.
+        sparse: ``False`` (default) | ``True`` | ``'auto'``. Store a masked /
+            banded weight as a ``SparseWeight`` (CSR/CSC) instead of a dense
+            matrix times a mask — same math, memory O(nnz). ``'auto'``
+            resolves at ``build()`` (density <= 5% and post*pre >= 2**20).
+            Falls back to dense on Metal. Not valid for conv transforms.
         weight_mask: Required when ``transformation='masked'`` with shape
             ``(post_dim, pre_dim)``. Optional for ``'conv'`` / ``'transconv'``
             with shape ``(out_channels, in_channels, kH, kW)``. Element-wise
@@ -574,6 +632,7 @@ class Predict:
         stride=None,
         padding=None,
         weight_mask=None,
+        sparse: Union[bool, str] = False,
         stochastic: bool = True,
         delay: int = 0,
         delay_unit: str = 'iteration',
@@ -708,7 +767,7 @@ class Predict:
         self.is_res = getattr(self, 'is_res', False)
         _setup_transform(self, transformation, self.pre_dim, self.post_dim,
                          kernel_size, input_shape, stride, padding,
-                         weight_mask=weight_mask)
+                         weight_mask=weight_mask, sparse=sparse)
 
         # Validate: slicing incompatible with conv/transconv
         has_slicing = any(s is not None for s in self.pre_slices) or self.post_slice is not None
@@ -975,6 +1034,7 @@ class Project:
         stride=None,
         padding=None,
         weight_mask=None,
+        sparse: Union[bool, str] = False,
         advance: str = 'iteration',
         delay: int = 0,
         delay_unit: str = 'iteration',
@@ -1074,7 +1134,7 @@ class Project:
         self.n_bands = 0
         _setup_transform(self, transformation, self.pre_dim, self.post_dim,
                          kernel_size, input_shape, stride, padding,
-                         weight_mask=weight_mask)
+                         weight_mask=weight_mask, sparse=sparse)
 
         # Validate: slicing incompatible with conv/transconv
         has_slicing = any(s is not None for s in self.pre_slices) or self.post_slice is not None
@@ -1172,6 +1232,7 @@ class Modulate:
         stride=None,
         padding=None,
         weight_mask=None,
+        sparse: Union[bool, str] = False,
         use_bias=_DEFAULT,
         advance: str = 'iteration',
         delay: int = 0,
@@ -1264,7 +1325,7 @@ class Modulate:
         self.n_bands = 0
         _setup_transform(self, transformation, self.pre_dim, self.post_dim,
                          kernel_size, input_shape, stride, padding,
-                         weight_mask=weight_mask)
+                         weight_mask=weight_mask, sparse=sparse)
 
         # Validate: slicing incompatible with conv/transconv
         has_slicing = any(s is not None for s in self.pre_slices) or self.post_slice is not None

@@ -1179,6 +1179,69 @@ class TestTransformationParam:
         # Zeros above and on diagonal, free below
         assert jnp.allclose(W * (1 - jnp.asarray(mask)), 0.0)
 
+    def test_masked_net_survives_repeated_train_calls(self):
+        """Weight masks must not be donated away by the donate='all' JIT.
+
+        Regression: masks are structural constants, but a masked conn's mask has
+        exactly the shape of its weight matrix, so XLA aliased it into the
+        updated-weights output and deleted the network's copy — every masked
+        network raised 'Array has been deleted' on the SECOND train() call.
+        """
+        import pcn
+        import numpy as np
+        import optax
+
+        rng = np.random.default_rng(0)
+        dims = [11, 8, 19, 13]
+        net = pcn.PCNetwork(seed=0)
+        with net:
+            ls = [pcn.Layer(dim=d, activation=pcn.Direct() if i == 0 else pcn.LeakyRelu(),
+                            label=f"l{i}") for i, d in enumerate(dims)]
+            for i in range(len(ls)):
+                for j in range(len(ls)):
+                    if i == j:
+                        continue
+                    pcn.Predict(ls[i], ls[j], transformation='masked',
+                                weight_mask=(rng.random((dims[j], dims[i])) < 0.5
+                                             ).astype(np.float32))
+        net.build()
+        l_in = ls[0]
+
+        # The contract of the fix: the JIT is handed copies, so anything the
+        # donation does to them leaves the network's canonical masks intact.
+        # (Whether XLA actually aliases a given mask depends on the graph — it
+        # reproduces on a connectome-scale net, not reliably on a toy one — so
+        # assert the invariant directly as well as through train().)
+        handed = net.donatable_weight_masks('predict')
+        live = [i for i, m in enumerate(net.predict_weight_masks) if m.ndim > 0]
+        assert live, "expected masked conns"
+        for i in live:
+            assert handed[i] is not net.predict_weight_masks[i]
+            np.testing.assert_array_equal(np.asarray(handed[i]),
+                                          np.asarray(net.predict_weight_masks[i]))
+            handed[i].delete()                       # what a donating XLA call does
+        assert not any(net.predict_weight_masks[i].is_deleted() for i in live)
+        masks_before = [np.asarray(m) for m in net.predict_weight_masks]
+
+        sim = pcn.Simulation(net)
+        loader = [{'x': rng.standard_normal((4, 11)).astype(np.float32)} for _ in range(2)]
+        kw = dict(data_map={l_in: 'x'}, epochs=1, iterations_per_sample=0,
+                  learning_iterations_per_sample=3, feedforward_init=False,
+                  values_optimizer=optax.sgd(0.1),
+                  params_optimizer=optax.adam(1e-3), verbose=False)
+        sim.train(loader, **kw)
+        sim.train(loader, **kw)          # would raise before the fix
+        sim.test(loader, data_map={l_in: 'x'}, iterations_per_sample=3,
+                 values_optimizer=optax.sgd(0.1), verbose=False)
+        sim.train(loader, **kw)
+
+        # The canonical masks are intact, and the mask is still enforced on W.
+        for i, (before, after) in enumerate(zip(masks_before, net.predict_weight_masks)):
+            assert not after.is_deleted()
+            np.testing.assert_array_equal(before, np.asarray(after))
+            W = np.asarray(sim.params.predict_weights[i])
+            assert np.allclose(W * (1.0 - before), 0.0), f"mask not enforced on conn {i}"
+
     def test_predict_masked_activation(self):
         """'masked-<activation>' sets BOTH the mask and the post-nonlinearity,
         and a self-loop lateral Predict trains with the mask enforced."""

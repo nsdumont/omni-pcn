@@ -176,7 +176,11 @@ class TestSpecPlumbing:
             # construction (checked separately) must stay valid.
             assert 'advance_timestep' in cls._fields
             assert cls._field_defaults['advance_timestep'] is False
-            assert cls._fields[-1] == 'pre_buffer_indices'
+            # Later features keep appending defaulted fields (delay buffers,
+            # then sparse weights); every appended field must default.
+            assert cls._fields[-1] == 'is_sparse'
+            assert cls._field_defaults['is_sparse'] is False
+            assert cls._field_defaults['pre_buffer_indices'] == ()
             assert cls._field_defaults['delay'] == 0
 
     def test_positional_construction_still_valid(self):

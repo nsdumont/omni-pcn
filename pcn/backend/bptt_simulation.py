@@ -56,6 +56,7 @@ import jax.numpy as jnp
 import optax
 from jax import lax
 
+from ..core.sparse import learnable_leaf, rebuild_weight
 from ..core.structure import NetworkStructure
 from ..core.state import NetworkParams
 from ..core.activations import ACTIVATIONS, _nwta
@@ -359,7 +360,7 @@ def run_bptt_batch(
             tuple(jnp.zeros((batch_size, dim)) for dim in layer_dims))
 
     trainable = {
-        'predict_weights': predict_weights,
+        'predict_weights': tuple(learnable_leaf(w) for w in predict_weights),
         'predict_biases': predict_biases,
         'precision_weights': precision_weights,
         'precision_biases': precision_biases,
@@ -370,7 +371,8 @@ def run_bptt_batch(
         if c.precision_input_node_types)
 
     def unroll(trainable_params):
-        pw = trainable_params['predict_weights']
+        pw = tuple(rebuild_weight(o, l)
+                   for o, l in zip(predict_weights, trainable_params['predict_weights']))
         pb = trainable_params['predict_biases']
         ppw = trainable_params['precision_weights']
         ppb = trainable_params['precision_biases']
@@ -558,10 +560,11 @@ def run_bptt_batch(
         grads, params_opt_state, trainable)
     new_trainable = optax.apply_updates(trainable, updates)
 
-    new_pw = list(new_trainable['predict_weights'])
+    new_pw = [rebuild_weight(o, l)
+              for o, l in zip(predict_weights, new_trainable['predict_weights'])]
     if predict_weight_masks:
         for i, conn in enumerate(predict_conns):
-            if conn.is_masked:
+            if conn.is_masked and not conn.is_sparse:
                 new_pw[i] = new_pw[i] * predict_weight_masks[i]
 
     new_params = NetworkParams(

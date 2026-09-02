@@ -22,6 +22,7 @@ from ..core.structure import NetworkStructure
 from ..core.learning_rules import Hebbian, ThreeFactorHebbian
 from ..core.state import NetworkState, NetworkParams
 from ..core.network import _make_band_mask
+from ..core.sparse import SparseWeight, sampled_outer, learnable_leaf, rebuild_weight
 from ..core.activations import ACTIVATIONS, _nwta  # re-exported for back-compat
 
 
@@ -621,18 +622,21 @@ def _combined_step(
     # Trainable dict: predict/precision params + GD-loss project/modulate weights
     # plus project/modulate biases (frozen via stop_gradient when has_bias=False)
     trainable = {
-        'predict_weights': predict_weights,
+        'predict_weights': tuple(learnable_leaf(w) for w in predict_weights),
         'predict_biases': predict_biases,
         'project_biases': project_biases,
         'modulate_biases': modulate_biases,
         'precision_weights': precision_weights,
         'precision_biases': precision_biases,
-        'gd_loss_project_weights': tuple(project_weights[idx] for idx, _ in gd_loss_project),
-        'gd_loss_modulate_weights': tuple(modulate_weights[idx] for idx, _ in gd_loss_modulate),
+        'gd_loss_project_weights': tuple(learnable_leaf(project_weights[idx]) for idx, _ in gd_loss_project),
+        'gd_loss_modulate_weights': tuple(learnable_leaf(modulate_weights[idx]) for idx, _ in gd_loss_modulate),
     }
 
     def energy_with_aux(vals, params):
-        pw = params['predict_weights']
+        # Sparse conns: re-attach the (traced) CSR/CSC structure to the
+        # learnable data leaf optax sees.
+        pw = tuple(rebuild_weight(o, l)
+                   for o, l in zip(predict_weights, params['predict_weights']))
         pb = params['predict_biases']
         proj_b_in = params['project_biases']
         mod_b_in = params['modulate_biases']
@@ -824,18 +828,18 @@ def _combined_step(
 
     # Compute loss grads for GD-loss connections and merge before optimizer call
     if gd_loss_project or gd_loss_modulate:
-        loss_gd_pw = tuple(project_weights[idx] for idx, _ in gd_loss_project)
-        loss_gd_mw = tuple(modulate_weights[idx] for idx, _ in gd_loss_modulate)
+        loss_gd_pw = tuple(learnable_leaf(project_weights[idx]) for idx, _ in gd_loss_project)
+        loss_gd_mw = tuple(learnable_leaf(modulate_weights[idx]) for idx, _ in gd_loss_modulate)
 
         def loss_objective(gd_pw_args, gd_mw_args):
             l_proj_w = list(project_weights)
             for k, (idx, _) in enumerate(gd_loss_project):
-                l_proj_w[idx] = gd_pw_args[k]
+                l_proj_w[idx] = rebuild_weight(project_weights[idx], gd_pw_args[k])
             l_proj_w = tuple(jax.lax.stop_gradient(w) if i not in {idx for idx, _ in gd_loss_project} else w
                              for i, w in enumerate(l_proj_w))
             l_mod_w = list(modulate_weights)
             for k, (idx, _) in enumerate(gd_loss_modulate):
-                l_mod_w[idx] = gd_mw_args[k]
+                l_mod_w[idx] = rebuild_weight(modulate_weights[idx], gd_mw_args[k])
             l_mod_w = tuple(jax.lax.stop_gradient(w) if i not in {idx for idx, _ in gd_loss_modulate} else w
                             for i, w in enumerate(l_mod_w))
 
@@ -935,7 +939,8 @@ def _combined_step(
     new_trainable = optax.apply_updates(trainable, updates)
 
     # Post-processing: restore fixed/non-learned predict params
-    new_pw = list(new_trainable['predict_weights'])
+    new_pw = [rebuild_weight(o, l)
+              for o, l in zip(predict_weights, new_trainable['predict_weights'])]
     new_pb = list(new_trainable['predict_biases'])
     new_ppw = list(new_trainable['precision_weights'])
     new_ppb = list(new_trainable['precision_biases'])
@@ -955,10 +960,11 @@ def _combined_step(
                 new_ppw[i] = precision_weights[i]
             if not conn.learn_precision_bias:
                 new_ppb[i] = precision_biases[i]
-        if conn.n_bands > 0:
+        # Sparse conns: the index set is the mask — nothing to re-apply.
+        if conn.n_bands > 0 and not conn.is_sparse:
             m, n = new_pw[i].shape
             new_pw[i] = new_pw[i] * _make_band_mask(m, n, conn.n_bands)
-        if conn.is_masked:
+        if conn.is_masked and not conn.is_sparse:
             new_pw[i] = new_pw[i] * predict_weight_masks[i]
 
     # Restore project/modulate biases for connections without use_bias
@@ -984,22 +990,24 @@ def _combined_step(
     new_project_weights = list(new_project_weights)
     new_modulate_weights = list(new_modulate_weights)
     for j, (idx, _) in enumerate(gd_loss_project):
-        new_project_weights[idx] = new_trainable['gd_loss_project_weights'][j]
+        new_project_weights[idx] = rebuild_weight(
+            project_weights[idx], new_trainable['gd_loss_project_weights'][j])
     for j, (idx, _) in enumerate(gd_loss_modulate):
-        new_modulate_weights[idx] = new_trainable['gd_loss_modulate_weights'][j]
+        new_modulate_weights[idx] = rebuild_weight(
+            modulate_weights[idx], new_trainable['gd_loss_modulate_weights'][j])
 
     # Re-mask banded / custom-masked project/modulate weights
     for i, conn in enumerate(project_conns):
-        if conn.n_bands > 0 and not (conn.is_conv or conn.is_transconv):
+        if conn.n_bands > 0 and not (conn.is_conv or conn.is_transconv or conn.is_sparse):
             m, n = new_project_weights[i].shape
             new_project_weights[i] = new_project_weights[i] * _make_band_mask(m, n, conn.n_bands)
-        if conn.is_masked:
+        if conn.is_masked and not conn.is_sparse:
             new_project_weights[i] = new_project_weights[i] * project_weight_masks[i]
     for i, conn in enumerate(modulate_conns):
-        if conn.n_bands > 0 and not (conn.is_conv or conn.is_transconv):
+        if conn.n_bands > 0 and not (conn.is_conv or conn.is_transconv or conn.is_sparse):
             m, n = new_modulate_weights[i].shape
             new_modulate_weights[i] = new_modulate_weights[i] * _make_band_mask(m, n, conn.n_bands)
-        if conn.is_masked:
+        if conn.is_masked and not conn.is_sparse:
             new_modulate_weights[i] = new_modulate_weights[i] * modulate_weight_masks[i]
 
     new_project_weights = tuple(new_project_weights)
@@ -1564,15 +1572,33 @@ def _learn_project_modulate_weights(
         pre_act = conn.get_pre(values, errors, activation_fns, precisions=precisions)
         post_arr = conn.get_post(values, errors, precisions=precisions)
 
+        sparse = isinstance(W, SparseWeight)
+        if sparse:
+            # Batch-mean outer product post^T pre sampled at the index set
+            # (nse,) — never the dense (post_dim, pre_dim) product.
+            def _outer(post):
+                return sampled_outer(post, pre_act, W.indices) / post.shape[0]
+
         if conn.learning_rule_type == 0:  # Hebbian
-            dW = conn.learning_rate * jnp.mean(
-                post_arr[:, :, None] * pre_act[:, None, :], axis=0)
-            weights_list[idx] = W + dW
+            if sparse:
+                weights_list[idx] = W.with_data(
+                    W.data + conn.learning_rate * _outer(post_arr))
+            else:
+                dW = conn.learning_rate * jnp.mean(
+                    post_arr[:, :, None] * pre_act[:, None, :], axis=0)
+                weights_list[idx] = W + dW
         elif conn.learning_rule_type == 3:  # Oja
-            hebbian = post_arr[:, :, None] * pre_act[:, None, :]
-            decay = (post_arr ** 2)[:, :, None] * W[None, :, :]
-            dW = conn.learning_rate * jnp.mean(hebbian - decay, axis=0)
-            weights_list[idx] = W + dW
+            if sparse:
+                # decay_k = mean_b post[b, row_k]^2 * W_k
+                sq = jnp.mean(post_arr ** 2, axis=0)
+                decay = sq[W.indices[:, 0]] * W.data
+                weights_list[idx] = W.with_data(
+                    W.data + conn.learning_rate * (_outer(post_arr) - decay))
+            else:
+                hebbian = post_arr[:, :, None] * pre_act[:, None, :]
+                decay = (post_arr ** 2)[:, :, None] * W[None, :, :]
+                dW = conn.learning_rate * jnp.mean(hebbian - decay, axis=0)
+                weights_list[idx] = W + dW
         elif conn.learning_rule_type == 1:  # ThreeFactorHebbian
             if conn.reward_fn_idx >= 0 and len(reward_fns) > conn.reward_fn_idx:
                 resolved_inputs, fn = reward_fns[conn.reward_fn_idx]
@@ -1581,10 +1607,14 @@ def _learn_project_modulate_weights(
                 reward = fn(*args)
                 if reward.ndim == 0:
                     reward = jnp.broadcast_to(reward, (batch_size,))
-                dW = conn.learning_rate * jnp.mean(
-                    reward[:, None, None] * post_arr[:, :, None] * pre_act[:, None, :],
-                    axis=0)
-                weights_list[idx] = W + dW
+                if sparse:
+                    weights_list[idx] = W.with_data(
+                        W.data + conn.learning_rate * _outer(reward[:, None] * post_arr))
+                else:
+                    dW = conn.learning_rate * jnp.mean(
+                        reward[:, None, None] * post_arr[:, :, None] * pre_act[:, None, :],
+                        axis=0)
+                    weights_list[idx] = W + dW
 
     for i, conn in enumerate(project_conns):
         _apply_rule(project_weights[i], conn, new_pw, i)
@@ -2389,14 +2419,14 @@ def run_batch(
             _params_optimizer = params_optimizer if params_optimizer is not None else optax.adam(1e-4)
             if params_opt_state is None:
                 _trainable = {
-                    'predict_weights': predict_weights,
+                    'predict_weights': tuple(learnable_leaf(w) for w in predict_weights),
                     'predict_biases': predict_biases,
                     'project_biases': project_biases,
                     'modulate_biases': modulate_biases,
                     'precision_weights': precision_weights,
                     'precision_biases': precision_biases,
-                    'gd_loss_project_weights': tuple(project_weights[idx] for idx, _ in gd_loss_project),
-                    'gd_loss_modulate_weights': tuple(modulate_weights[idx] for idx, _ in gd_loss_modulate),
+                    'gd_loss_project_weights': tuple(learnable_leaf(project_weights[idx]) for idx, _ in gd_loss_project),
+                    'gd_loss_modulate_weights': tuple(learnable_leaf(modulate_weights[idx]) for idx, _ in gd_loss_modulate),
                 }
                 new_params_opt_state = _params_optimizer.init(_trainable)
 

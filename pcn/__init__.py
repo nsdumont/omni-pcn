@@ -61,10 +61,11 @@ from .core.sensory import (
 )
 from .core.activations import (
     Activation, Direct, Relu, ThresholdRelu, Softmax, Tanh, HardTanh, Sigmoid, LeakyRelu, Gelu, Elu,
-    LayerNorm, NWTA, Poisson, MemoryActivation, Leaky, StochasticActivation, Stochastic,
+    LayerNorm, NWTA, Poisson, MemoryActivation, Leaky, StochasticActivation, Stochastic, BatchStandardize,
 )
 from .core.learning_rules import LearningRule, Hebbian, Oja, ThreeFactorHebbian, GradientDescent, NoLearning
 from .core.state import NetworkState, NetworkParams
+from .core.sparse import SparseWeight
 from .core.structure import NetworkStructure
 from .core.regularization import L1Norm, L2Norm, UnitNorm, SIGReg, SupConLoss, SumReg
 
@@ -132,6 +133,7 @@ __all__ = [
     'LeakyRelu',
     'Gelu',
     'LayerNorm',
+    'BatchStandardize',
     'NWTA',
     'Elu',
     'Poisson',
@@ -157,6 +159,7 @@ __all__ = [
     'NetworkState',
     'NetworkParams',
     'NetworkStructure',
+    'SparseWeight',
     # Configuration
     'load_config',
     'activation_from_name',

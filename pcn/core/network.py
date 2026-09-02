@@ -26,6 +26,8 @@ from .connections import (
 )
 from ..config import DEFAULTS, load_config, _DEFAULT, validate_keys
 from .activations import activation_from_name, Activation, Poisson
+from . import sparse as _sparse
+from .sparse import SparseWeight, resolve_sparse_mode, indices_to_dense_mask
 
 
 def _make_band_mask(m, n, n_bands):
@@ -314,6 +316,9 @@ class PCNetwork:
         # Sort connections by order
         self._sort_connections()
 
+        # Resolve sparse=True/'auto' per connection (needs the platform)
+        self._resolve_sparse()
+
         # Build structure
         self.structure = self._build_structure()
 
@@ -529,6 +534,7 @@ class PCNetwork:
                 error_activation_type=getattr(conn, 'error_activation_type', 0),
                 post_activation_type=getattr(conn, 'post_activation_type_id', 0),
                 is_masked=getattr(conn, 'is_masked', False),
+                is_sparse=getattr(conn, 'is_sparse', False),
                 precision_input_norm=getattr(conn, 'precision_input_norm', False),
                 stochastic=getattr(conn, 'stochastic', True),
                 precision_input_idx=pin_idx,
@@ -601,6 +607,7 @@ class PCNetwork:
                 has_bias=getattr(conn, 'use_bias', False),
                 post_activation_type=getattr(conn, 'post_activation_type_id', 0),
                 is_masked=getattr(conn, 'is_masked', False),
+                is_sparse=getattr(conn, 'is_sparse', False),
                 advance_timestep=(getattr(conn, 'advance', 'iteration') == 'timestep'),
                 delay=int(getattr(conn, 'delay', 0)),
                 delay_unit_ts=(getattr(conn, 'delay_unit', 'iteration') == 'timestep'),
@@ -636,6 +643,7 @@ class PCNetwork:
                 has_bias=getattr(conn, 'use_bias', False),
                 post_activation_type=getattr(conn, 'post_activation_type_id', 0),
                 is_masked=getattr(conn, 'is_masked', False),
+                is_sparse=getattr(conn, 'is_sparse', False),
                 advance_timestep=(getattr(conn, 'advance', 'iteration') == 'timestep'),
                 delay=int(getattr(conn, 'delay', 0)),
                 delay_unit_ts=(getattr(conn, 'delay_unit', 'iteration') == 'timestep'),
@@ -901,6 +909,68 @@ class PCNetwork:
 
         self.spatial_neighborhoods = tuple(neighborhoods)
 
+    def _resolve_sparse(self) -> None:
+        """Decide per connection whether ``sparse=`` becomes a ``SparseWeight``.
+
+        ``sparse=True`` → sparse. ``sparse='auto'`` → sparse iff
+        ``density <= AUTO_MAX_DENSITY and post*pre >= AUTO_MIN_SIZE``
+        (``pcn.core.sparse``). On Metal (jax-mps has no cuSPARSE custom-call)
+        the dense path is used unless ``pcn.core.sparse.SPARSE_ON_METAL`` is
+        True. A masked connection that falls back gets its index set
+        densified into ``conn.weight_mask``; a banded one keeps the band path.
+        """
+        import warnings
+        for conn in self._all_conns:
+            mode = getattr(conn, 'sparse_mode', False)
+            if not mode:
+                continue
+            rows, cols = conn.sparse_indices
+            shape = (conn.post_dim, conn.pre_dim)
+            use = resolve_sparse_mode(mode, len(rows), shape)
+            if use and jax.default_backend() == 'METAL' and not _sparse.SPARSE_ON_METAL:
+                warnings.warn(
+                    f"{conn!r}: sparse weights are not supported on the Metal "
+                    "backend (no cuSPARSE); using the dense masked path. Set "
+                    "PCN_SPARSE_ON_METAL=1 to force the generic sparse lowering.",
+                    RuntimeWarning, stacklevel=3)
+                use = False
+            conn.is_sparse = use
+            if not use and conn.is_masked and conn.weight_mask is None:
+                conn.weight_mask = indices_to_dense_mask(rows, cols, shape)
+
+    def _init_sparse_weight(self, conn, kind: str) -> SparseWeight:
+        """Initialise a ``SparseWeight`` for a ``sparse=True`` connection.
+
+        Same fan-in/fan-out statistics as the dense path of the same kind;
+        the values are drawn directly for the ``nse`` nonzeros, so the dense
+        ``(post, pre)`` matrix is never formed. A user ``init_weight`` is
+        sampled at the index set.
+        """
+        rows, cols = conn.sparse_indices
+        shape = (conn.post_dim, conn.pre_dim)
+        nse = len(rows)
+        if conn.weight is not None:
+            data = np.asarray(conn.weight, dtype=np.float32)
+            if data.shape != shape:
+                raise ValueError(
+                    f"init_weight shape {data.shape} does not match {shape}")
+            return SparseWeight.from_indices(rows, cols, shape, data[rows, cols])
+        self.rng, subkey = jax.random.split(self.rng)
+        noise = jax.random.normal(subkey, (nse,))
+        fan_in, fan_out = conn.pre_dim, conn.post_dim
+        if kind == 'predict':
+            first_pre = conn.pre[0]
+            if first_pre.f.init_type == 'xavier':
+                fan_avg = fan_in + fan_out
+            elif first_pre.f.init_type == 'he':
+                fan_avg = fan_in
+            data = noise * (first_pre.f.init_scale * jnp.sqrt(1.0 / fan_avg))
+        elif kind == 'project':
+            data = noise * (jnp.sqrt(2.0 / (fan_in + fan_out)) * getattr(conn, 'init_scale', 1.0))
+        else:  # modulate: identity-ish modulation at init (see dense path)
+            data = noise * 0.01 if conn.use_bias else 1.0 + noise * 0.01
+        return SparseWeight.from_indices(rows, cols, shape, np.asarray(data))
+
     def _initialize_params(self, weight_initialization='xavier') -> NetworkParams:
         """Initialize all parameters.
 
@@ -913,7 +983,9 @@ class PCNetwork:
         predict_weights = []
 
         for conn in self._predict_conns:
-            if conn.weight is not None:  # user set their own weight matrix
+            if getattr(conn, 'is_sparse', False):
+                predict_weights.append(self._init_sparse_weight(conn, 'predict'))
+            elif conn.weight is not None:  # user set their own weight matrix
                 W = jnp.array(conn.weight)
                 if getattr(conn, 'is_masked', False):
                     W = W * jnp.asarray(conn.weight_mask, dtype=W.dtype)
@@ -951,7 +1023,9 @@ class PCNetwork:
             post_dim = conn.post_dim
             is_conv = getattr(conn, 'is_conv', False) or getattr(conn, 'is_transconv', False)
 
-            if conn.weight is not None:
+            if getattr(conn, 'is_sparse', False):
+                project_weights.append(self._init_sparse_weight(conn, 'project'))
+            elif conn.weight is not None:
                 W = jnp.array(conn.weight)
                 if getattr(conn, 'is_masked', False):
                     W = W * jnp.asarray(conn.weight_mask, dtype=W.dtype)
@@ -998,7 +1072,9 @@ class PCNetwork:
             else:
                 shape = (post_dim, pre_dim)
 
-            if conn.weight is not None:
+            if getattr(conn, 'is_sparse', False):
+                W = self._init_sparse_weight(conn, 'modulate')
+            elif conn.weight is not None:
                 W = jnp.array(conn.weight)
             else:
                 self.rng, subkey = jax.random.split(self.rng)
@@ -1017,9 +1093,11 @@ class PCNetwork:
                     modulate_biases.append(jnp.ones(bias_dim, dtype=jnp.float32))
             else:
                 modulate_biases.append(jnp.zeros(1, dtype=jnp.float32))  # dummy, always adds 0
-            if conn.n_bands > 0 and not is_conv:
+            if getattr(conn, 'is_sparse', False):
+                pass  # structure is the mask
+            elif conn.n_bands > 0 and not is_conv:
                 W = W * _make_band_mask(post_dim, pre_dim, conn.n_bands)
-            if getattr(conn, 'is_masked', False):
+            elif getattr(conn, 'is_masked', False):
                 W = W * jnp.asarray(conn.weight_mask, dtype=W.dtype)
             modulate_weights.append(W)
 
@@ -1086,7 +1164,7 @@ class PCNetwork:
         _dummy_mask = jnp.zeros((), dtype=jnp.float32)
 
         def _mask_for(conn):
-            if getattr(conn, 'is_masked', False):
+            if getattr(conn, 'is_masked', False) and not getattr(conn, 'is_sparse', False):
                 return jnp.asarray(conn.weight_mask, dtype=jnp.float32)
             return _dummy_mask
 
@@ -1112,6 +1190,46 @@ class PCNetwork:
             precision_weights=precision_weights,
             precision_biases=precision_biases,
         )
+
+    def dense_weights(self, kind: str = 'predict') -> tuple:
+        """Weights of one kind as dense arrays (``SparseWeight`` → ``todense()``).
+
+        For snapshots / analysis only — materialises every sparse conn.
+        """
+        return tuple(w.todense() if isinstance(w, SparseWeight) else w
+                     for w in getattr(self.params, f'{kind}_weights'))
+
+    def donatable_weight_masks(self, kind: str) -> tuple:
+        """Weight masks for a ``donate='all'`` JIT call, safe to hand over.
+
+        ``run_batch`` / ``run_bptt_batch`` are ``@eqx.filter_jit(donate='all')``,
+        so *every* array argument is offered to XLA for buffer aliasing. Weight
+        masks are structural constants that must survive for the lifetime of the
+        network, but XLA happily aliases one into a same-shaped output (a masked
+        connection's weight matrix has exactly the mask's shape), which deletes
+        the network's copy — the next call then raises
+        ``RuntimeError: Array has been deleted``. Symptom: any network with a
+        ``transformation='masked'`` connection fails on the *second*
+        ``train()`` / ``test()`` call.
+
+        So hand the JIT a fresh copy and keep the canonical arrays here. The
+        copies are device-to-device and transient (freed after the call), which
+        is negligible next to a batch of inference.
+
+        Args:
+            kind: ``'predict'``, ``'project'`` or ``'modulate'``.
+
+        Returns:
+            Tuple of masks, one per connection of that kind. Unmasked positions
+            keep their 0-dim dummy (never read — the backend guards on
+            ``spec.is_masked``) and are passed through without copying.
+        """
+        masks = getattr(self, f'{kind}_weight_masks', ())
+        if not masks:
+            return masks
+        # 0-dim dummies cannot alias a real weight; only copy the live masks.
+        return tuple(jnp.array(m, copy=True) if getattr(m, 'ndim', 0) > 0 else m
+                     for m in masks)
 
     def get_layer(self, identifier) -> Layer:
         """
@@ -1427,7 +1545,14 @@ class PCNetwork:
                      'precision_weights', 'precision_biases'):
             grp = pg.create_group(name)
             for i, arr in enumerate(getattr(params, name)):
-                grp.create_dataset(str(i), data=np.asarray(arr, dtype=np.float32))
+                if isinstance(arr, SparseWeight):
+                    sg = grp.create_group(str(i))
+                    sg.attrs['sparse'] = True
+                    sg.attrs['shape'] = np.asarray(arr.shape, dtype=np.int64)
+                    for fld in ('data', 'indices', 'indptr', 't_indptr', 't_perm'):
+                        sg.create_dataset(fld, data=np.asarray(getattr(arr, fld)))
+                else:
+                    grp.create_dataset(str(i), data=np.asarray(arr, dtype=np.float32))
 
     @staticmethod
     def _save_results(f, results: Dict[str, Any]) -> None:
@@ -1479,13 +1604,28 @@ class PCNetwork:
                     f"current {self.structure.layer_dims}"
                 )
 
-            self.params = self._load_params(f)
+            params = self._load_params(f)
+
+        # A sparse conn must load a SparseWeight and a dense one a matrix.
+        # Validate before touching self.params so a failed load is a no-op.
+        for kind, specs in (('predict', self.structure.predict_conns),
+                            ('project', self.structure.project_conns),
+                            ('modulate', self.structure.modulate_conns)):
+            for i, (w, spec) in enumerate(zip(getattr(params, f'{kind}_weights'), specs)):
+                if isinstance(w, SparseWeight) != bool(spec.is_sparse):
+                    raise ValueError(
+                        f"{kind} conn {i}: saved weight is "
+                        f"{'sparse' if isinstance(w, SparseWeight) else 'dense'} but the "
+                        f"built network expects {'sparse' if spec.is_sparse else 'dense'} "
+                        f"(sparse= mismatch).")
+        self.params = params
 
         return self
 
     @staticmethod
     def _load_params(f) -> NetworkParams:
         """Read NetworkParams from an HDF5 file."""
+        import h5py
         pg = f['params']
         loaded = {}
         for name in ('predict_weights', 'predict_biases',
@@ -1505,6 +1645,16 @@ class PCNetwork:
             grp = pg[name]
             arrays = []
             for i in range(len(grp)):
-                arrays.append(jnp.array(grp[str(i)][...]))
+                item = grp[str(i)]
+                if isinstance(item, h5py.Group):     # SparseWeight
+                    arrays.append(SparseWeight(
+                        data=jnp.asarray(item['data'][...], dtype=jnp.float32),
+                        indices=jnp.asarray(item['indices'][...], dtype=jnp.int32),
+                        indptr=jnp.asarray(item['indptr'][...], dtype=jnp.int32),
+                        t_indptr=jnp.asarray(item['t_indptr'][...], dtype=jnp.int32),
+                        t_perm=jnp.asarray(item['t_perm'][...], dtype=jnp.int32),
+                        shape=tuple(int(v) for v in item.attrs['shape'])))
+                else:
+                    arrays.append(jnp.array(item[...]))
             loaded[name] = arrays
         return NetworkParams(**loaded)

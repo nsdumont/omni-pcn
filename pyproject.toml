@@ -28,6 +28,7 @@ dependencies = [
     "h5py>=3.0.0",
     "equinox>=0.13.4",
     "optax==0.2.5",
+    "scipy>=1.10.0",
 ]
 
 [tool.uv]
@@ -61,6 +62,11 @@ mps = [
 # CUDA support
 cuda = [
     "jax[cuda12]==0.9.2",
+]
+# Spoken-alphanumeric audio synthesis (examples/generate_alphanum_audio.py)
+audio = [
+    "edge-tts>=6.1.0",
+    "imageio-ffmpeg>=0.5.0",
 ]
 # Development dependencies
 dev = [

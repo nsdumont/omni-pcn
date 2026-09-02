@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import optax
 import time
 from tqdm import tqdm
+from .core.sparse import learnable_leaf
 from .core.network import PCNetwork
 from .core.layer import Layer, NodeRef
 from .core.state import NetworkState, NetworkParams
@@ -447,16 +448,14 @@ class Simulation:
             self._params_optimizer = params_optimizer
             structure = self.net.structure
             trainable = {
-                'predict_weights': tuple(self.params.predict_weights),
+                'predict_weights': tuple(learnable_leaf(w) for w in self.params.predict_weights),
                 'predict_biases': tuple(self.params.predict_biases),
                 'project_biases': tuple(self.params.project_biases),
                 'modulate_biases': tuple(self.params.modulate_biases),
                 'precision_weights': tuple(self.params.precision_weights),
                 'precision_biases': tuple(self.params.precision_biases),
-                'gd_loss_project_weights': tuple(
-                    self.params.project_weights[idx] for idx, _ in structure.gd_loss_project),
-                'gd_loss_modulate_weights': tuple(
-                    self.params.modulate_weights[idx] for idx, _ in structure.gd_loss_modulate),
+                'gd_loss_project_weights': tuple(learnable_leaf(self.params.project_weights[idx]) for idx, _ in structure.gd_loss_project),
+                'gd_loss_modulate_weights': tuple(learnable_leaf(self.params.modulate_weights[idx]) for idx, _ in structure.gd_loss_modulate),
             }
             self._params_opt_state = self._params_optimizer.init(trainable)
 
@@ -522,9 +521,9 @@ class Simulation:
                     is_stochastic=is_stochastic,
                     spatial_neighborhoods=getattr(self.net, 'spatial_neighborhoods', ()),
                     log_initial=log_initial,
-                    predict_weight_masks=getattr(self.net, 'predict_weight_masks', ()),
-                    project_weight_masks=getattr(self.net, 'project_weight_masks', ()),
-                    modulate_weight_masks=getattr(self.net, 'modulate_weight_masks', ()),
+                    predict_weight_masks=self.net.donatable_weight_masks('predict'),
+                    project_weight_masks=self.net.donatable_weight_masks('project'),
+                    modulate_weight_masks=self.net.donatable_weight_masks('modulate'),
                     predict_error_activations=getattr(self.net, 'predict_error_activations', ()),
                     predict_precision_activations=getattr(self.net, 'predict_precision_activations', ()),
                     layer_activations=getattr(self.net, 'layer_activations', ()),

@@ -77,8 +77,8 @@ with net:
     l_output = pcn.Layer(dim=10, activation=pcn.Softmax(), label="output")
 
     # Define connections (lower predicts higher for discriminative)
-    pcn.Predict(l_input, l_hidden, learning_rate=1e-3)
-    pcn.Predict(l_hidden, l_output, learning_rate=1e-3)
+    pcn.Predict(l_input, l_hidden)
+    pcn.Predict(l_hidden, l_output)
 
 # Build the network (compiles structure)
 net.build()
@@ -161,6 +161,8 @@ sim.train(
 print(f"Final energy: {sim.final_energy:.4f}")
 ```
 
+By default, the values will be updated for `iterations_per_sample` than `learning_iterations_per_sample` value + weight updates will be performed. To do iPC (every step update both values and weights) use `iterations_per_sample`=0 and `learning_iterations_per_sample`>0.
+
 ### Clamping options
 
 `data_map` ties layers to sample keys. Beyond the hard clamp
@@ -169,10 +171,9 @@ print(f"Final energy: {sim.final_energy:.4f}")
 - **Masked (partial) clamp** — `{l: ('data', 'mask')}` with a 0/1 mask: clamp
   only the observed dimensions and infer the rest. Useful for missing-data /
   inpainting — clamp the known pixels, let inference fill the holes.
-- **Soft clamp / nudge** — the same tuple form with a mask in `(0, 1)`: the
-  layer is held a fraction `β` toward the data rather than pinned. This is
-  somewhat like positive nudging (cf. the PCX paper); in cog-sci terms it lets a prior shape
-  the "input" the network actually perceives (as perception partly does).
+- **Soft clamp / nudge** — the same tuple form with a mask entries in `(0, 1)`: the
+  layer is held a fraction `β` toward the data. This is
+  somewhat like positive nudging (cf. the PCX paper) but not exactly the same; it lets a prior nudge the "input" the network actually perceives.
 - **Temporal clamp** — pass a `(batch, T, dim)` array and set
   `iterations_per_sample` to a multiple of `T`; each data timestep then gets
   `iterations_per_sample // T` energy-relaxation iterations while the
@@ -185,6 +186,28 @@ sim.train(seq_loader, data_map={l_in: 'seq'},                      # (batch, T, 
           iterations_per_sample=4 * T)                             # 4 relax steps / timestep
 ```
 
+<!-- 
+### Sparse weights
+
+A masked or banded linear connection can store its weight as a `SparseWeight`
+(CSR/CSC, memory O(nnz)) instead of a dense matrix multiplied by a mask:
+
+```python
+with net:
+    l_a = pcn.Layer(dim=20000)
+    l_b = pcn.Layer(dim=20000)
+    # weight_mask: dense array, scipy.sparse matrix, BCOO, or (rows, cols) index arrays
+    pcn.Predict(l_a, l_b, transformation='masked', weight_mask=(rows, cols), sparse=True)
+    pcn.Predict(l_b, l_a, transformation='banded5', sparse='auto')
+```
+
+The math is identical to the dense masked connection (the tests train both
+side by side). Only the nonzero values are learned, so every optax transform
+works unchanged; the product runs on cuSPARSE with a custom VJP. It pays off
+at densities below a few percent on matrices of a few thousand rows or more
+(`'auto'` picks sparse when density ≤ 5% and post·pre ≥ 2²⁰). Use
+`w.todense()` / `net.dense_weights('predict')` to inspect a sparse weight.
+On the Metal backend the dense path is used. -->
 
 ### Delayed connections & temporal predictive coding
 

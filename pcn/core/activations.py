@@ -590,6 +590,35 @@ class Stochastic(StochasticActivation):
                 f"{params})")
 
 
+class BatchStandardize(Activation):
+    """Hard per-dimension standardization ACROSS THE BATCH (axis 0).
+
+    ``f(x) = (x - mean_B(x)) / (std_B(x) + eps)`` — a batch-axis normalizer for
+    anti-collapse use on code layers: the batch-shared component of the
+    activation never reaches downstream connections, so a collapsed shared
+    direction carries no signal and the weights must use per-sample deviations.
+
+    Caveats (BatchNorm-family): the output depends on batch composition;
+    gradients couple samples within a batch; with a (static) batch of 1 or a
+    1-D input it degrades to the identity. eps = 1e-3 bounds the gain on
+    near-constant dimensions.
+    """
+    type_id = 15
+    init_type = 'xavier'
+    init_scale = 1.
+
+    @staticmethod
+    def fn(x):
+        if x.ndim < 2 or x.shape[0] == 1:
+            return x
+        mu = jnp.mean(x, axis=0, keepdims=True)
+        # eps INSIDE the sqrt (BatchNorm form): sqrt(var)'s gradient is NaN at
+        # zero variance, which a zero-init batch (feedforward_init=False) hits
+        # on the very first value update
+        sd = jnp.sqrt(jnp.var(x, axis=0, keepdims=True) + 1e-6)
+        return (x - mu) / sd
+
+
 # Ordered list of activation classes — index = type_id.
 _ACTIVATION_CLASSES = (
     Direct,      # 0
@@ -607,6 +636,7 @@ _ACTIVATION_CLASSES = (
     NWTA,        # 12
     HardTanh,    # 13
     ThresholdRelu,  # 14
+    BatchStandardize,  # 15
 )
 
 # Canonical activation function tuple, indexed by type_id. Imported by the
@@ -633,6 +663,8 @@ ACTIVATION_REGISTRY = {
     "exp": Exp,
     "layernorm": LayerNorm,
     "layer_norm": LayerNorm,
+    "batchstd": BatchStandardize,
+    "batch_standardize": BatchStandardize,
     "nwta": NWTA,
     "poisson": Poisson,
     "leaky": Leaky,
