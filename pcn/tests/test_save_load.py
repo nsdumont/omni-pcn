@@ -1,11 +1,8 @@
 """Tests for PCNetwork save/load functionality."""
 
-import tempfile
-import os
 from pathlib import Path
 
 import h5py
-import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -118,15 +115,12 @@ class TestLoad:
         net2.build()
 
         # Weights should differ before load
-        assert not np.allclose(
-            np.array(net2.params.predict_weights[0]),
-            original_weights[0]
-        )
+        assert not np.allclose(np.array(net2.params.predict_weights[0]), original_weights[0])
 
         net2.load(path)
 
         # After load, weights should match
-        for orig, loaded in zip(original_weights, net2.params.predict_weights):
+        for orig, loaded in zip(original_weights, net2.params.predict_weights, strict=False):
             np.testing.assert_array_almost_equal(np.array(loaded), orig)
 
     def test_load_restores_log_precisions(self, built_network, tmp_path):
@@ -143,9 +137,13 @@ class TestLoad:
         net2.build()
         net2.load(path)
 
-        for orig, loaded in zip(built_network.params.precision_biases, net2.params.precision_biases):
+        for orig, loaded in zip(
+            built_network.params.precision_biases, net2.params.precision_biases, strict=False
+        ):
             np.testing.assert_array_almost_equal(np.array(loaded), np.array(orig))
-        for orig, loaded in zip(built_network.params.precision_weights, net2.params.precision_weights):
+        for orig, loaded in zip(
+            built_network.params.precision_weights, net2.params.precision_weights, strict=False
+        ):
             np.testing.assert_array_almost_equal(np.array(loaded), np.array(orig))
 
     def test_load_raises_if_not_built(self, built_network, tmp_path):

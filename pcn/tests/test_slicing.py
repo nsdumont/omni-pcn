@@ -1,5 +1,4 @@
-"""
-Tests for structural slicing on NodeRef/Layer.
+"""Tests for structural slicing on NodeRef/Layer.
 
 Verifies:
 - Layer.__getitem__ and NodeRef.__getitem__ produce correct slice_bounds
@@ -9,16 +8,15 @@ Verifies:
 - Error cases: out-of-bounds, double slice, conv+slicing
 """
 
-import pytest
 import jax
 import jax.numpy as jnp
-import numpy as np
+import pytest
 
 import pcn
 from pcn.backend import run_batch
 
-
 # ── Layer / NodeRef indexing ────────────────────────────────────────────────
+
 
 class TestLayerGetitem:
     def test_single_index(self):
@@ -68,7 +66,7 @@ class TestLayerGetitem:
             layer = pcn.Layer(dim=10, label="x")
         ref = layer.value[3:7]
         assert ref.slice_bounds == (3, 7)
-        assert ref.node_type == 'value'
+        assert ref.node_type == "value"
 
 
 class TestNodeRefSliceErrors:
@@ -103,6 +101,7 @@ class TestNodeRefSliceErrors:
 
 
 # ── Sliced connection construction ──────────────────────────────────────────
+
 
 class TestSlicedProjectConstruction:
     def test_sliced_pre(self):
@@ -213,11 +212,11 @@ class TestSlicedPredictConstruction:
             l1 = pcn.Layer(dim=16, label="a")
             l2 = pcn.Layer(dim=32, label="b")
             with pytest.raises(ValueError):
-                pcn.Predict(l1[:8], l2, transformation='conv',
-                            kernel_size=3, input_shape=(4, 4))
+                pcn.Predict(l1[:8], l2, transformation="conv", kernel_size=3, input_shape=(4, 4))
 
 
 # ── ConnSpec slice field verification ───────────────────────────────────────
+
 
 class TestConnSpecSliceFields:
     def test_predict_spec_slices(self):
@@ -260,6 +259,7 @@ class TestConnSpecSliceFields:
 
 # ── Integration: run_batch with sliced connections ──────────────────────────
 
+
 class TestSlicedProjectFunctional:
     def test_sliced_project_only_affects_target_dims(self):
         """Project targeting l2[:3] should only modify first 3 dims of l2."""
@@ -271,9 +271,9 @@ class TestSlicedProjectFunctional:
 
             pcn.Predict(l2, l1)
             pcn.Predict(l3, l2)
-            pcn.Project(l3.value, l2[:3],
-                        update_rule=pcn.NoLearning(),
-                        init_weight=jnp.ones((3, 4)))
+            pcn.Project(
+                l3.value, l2[:3], update_rule=pcn.NoLearning(), init_weight=jnp.ones((3, 4))
+            )
         net.build()
 
         # Build baseline without Project
@@ -287,24 +287,37 @@ class TestSlicedProjectFunctional:
         net_base.build()
 
         # run_batch donates its array inputs; build a fresh sample for each call.
-        sample = {'input': jax.random.normal(jax.random.PRNGKey(99), (4, 6))}
-        sample_base = {'input': jax.random.normal(jax.random.PRNGKey(99), (4, 6))}
-        data_map = ((0, 'input'),)
+        sample = {"input": jax.random.normal(jax.random.PRNGKey(99), (4, 6))}
+        sample_base = {"input": jax.random.normal(jax.random.PRNGKey(99), (4, 6))}
+        data_map = ((0, "input"),)
 
         _, _, _, vl, _, _, _, _ = run_batch(
-            sample, net.params, net.structure,
-            data_map, n_iterations=10, log_every=10, learning=False)
+            sample,
+            net.params,
+            net.structure,
+            data_map,
+            n_iterations=10,
+            log_every=10,
+            learning=False,
+        )
 
         _, _, _, vl_base, _, _, _, _ = run_batch(
-            sample_base, net_base.params, net_base.structure,
-            data_map, n_iterations=10, log_every=10, learning=False)
+            sample_base,
+            net_base.params,
+            net_base.structure,
+            data_map,
+            n_iterations=10,
+            log_every=10,
+            learning=False,
+        )
 
-        hidden_vals = vl[1][-1]       # (batch, 8)
+        hidden_vals = vl[1][-1]  # (batch, 8)
         hidden_base = vl_base[1][-1]  # (batch, 8)
 
         # First 3 dims should differ (project target)
-        assert not jnp.allclose(hidden_vals[:, :3], hidden_base[:, :3], atol=1e-4), \
+        assert not jnp.allclose(hidden_vals[:, :3], hidden_base[:, :3], atol=1e-4), (
             "Sliced project should modify targeted dimensions"
+        )
 
     def test_sliced_project_run_batch_completes(self):
         """run_batch with sliced Project completes without error."""
@@ -315,22 +328,28 @@ class TestSlicedProjectFunctional:
             l3 = pcn.Layer(dim=4, label="output")
             pcn.Predict(l2, l1)
             pcn.Predict(l3, l2)
-            pcn.Project(l3[:2], l2[4:8],
-                        update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Project(l3[:2], l2[4:8], update_rule=pcn.Hebbian(learning_rate=1e-3))
         net.build()
 
         sample = {
-            'input': jax.random.normal(jax.random.PRNGKey(0), (4, 10)),
-            'output': jax.nn.softmax(jax.random.normal(jax.random.PRNGKey(1), (4, 4)), axis=-1),
+            "input": jax.random.normal(jax.random.PRNGKey(0), (4, 10)),
+            "output": jax.nn.softmax(jax.random.normal(jax.random.PRNGKey(1), (4, 4)), axis=-1),
         }
-        data_map = ((0, 'input'), (2, 'output'))
+        data_map = ((0, "input"), (2, "output"))
 
         import optax
+
         new_params, _, _, vl, el, _, _, energies = run_batch(
-            sample, net.params, net.structure,
-            data_map, n_iterations=5, log_every=5,
-            learning=True, n_learning_iterations=3,
-            params_optimizer=optax.adam(1e-3))
+            sample,
+            net.params,
+            net.structure,
+            data_map,
+            n_iterations=5,
+            log_every=5,
+            learning=True,
+            n_learning_iterations=3,
+            params_optimizer=optax.adam(1e-3),
+        )
         assert energies.shape[0] > 0
 
 
@@ -344,12 +363,12 @@ class TestSlicedPredictFunctional:
             pcn.Predict(l1[:5], l2)
         net.build()
 
-        sample = {'input': jax.random.normal(jax.random.PRNGKey(0), (4, 10))}
-        data_map = ((0, 'input'),)
+        sample = {"input": jax.random.normal(jax.random.PRNGKey(0), (4, 10))}
+        data_map = ((0, "input"),)
 
         _, _, _, vl, el, _, _, energies = run_batch(
-            sample, net.params, net.structure,
-            data_map, n_iterations=5, log_every=5, learning=False)
+            sample, net.params, net.structure, data_map, n_iterations=5, log_every=5, learning=False
+        )
         assert len(vl) == 2
         assert len(el) == 1
         assert energies.shape[0] > 0
@@ -365,12 +384,12 @@ class TestSlicedPredictFunctional:
 
         assert net.structure.predict_error_dims[0] == 4
 
-        sample = {'input': jax.random.normal(jax.random.PRNGKey(0), (4, 10))}
-        data_map = ((0, 'input'),)
+        sample = {"input": jax.random.normal(jax.random.PRNGKey(0), (4, 10))}
+        data_map = ((0, "input"),)
 
         _, _, _, vl, el, _, _, energies = run_batch(
-            sample, net.params, net.structure,
-            data_map, n_iterations=5, log_every=5, learning=False)
+            sample, net.params, net.structure, data_map, n_iterations=5, log_every=5, learning=False
+        )
         assert energies.shape[0] > 0
 
 
@@ -384,22 +403,28 @@ class TestSlicedModulateFunctional:
             l3 = pcn.Layer(dim=4, label="output")
             p1 = pcn.Predict(l2, l1)
             pcn.Predict(l3, l2)
-            pcn.Modulate(l3[0], p1.error,
-                         update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Modulate(l3[0], p1.error, update_rule=pcn.Hebbian(learning_rate=1e-3))
         net.build()
 
         sample = {
-            'input': jax.random.normal(jax.random.PRNGKey(0), (4, 10)),
-            'output': jax.nn.softmax(jax.random.normal(jax.random.PRNGKey(1), (4, 4)), axis=-1),
+            "input": jax.random.normal(jax.random.PRNGKey(0), (4, 10)),
+            "output": jax.nn.softmax(jax.random.normal(jax.random.PRNGKey(1), (4, 4)), axis=-1),
         }
-        data_map = ((0, 'input'), (2, 'output'))
+        data_map = ((0, "input"), (2, "output"))
 
         import optax
+
         new_params, _, _, vl, el, _, _, energies = run_batch(
-            sample, net.params, net.structure,
-            data_map, n_iterations=5, log_every=5,
-            learning=True, n_learning_iterations=3,
-            params_optimizer=optax.adam(1e-3))
+            sample,
+            net.params,
+            net.structure,
+            data_map,
+            n_iterations=5,
+            log_every=5,
+            learning=True,
+            n_learning_iterations=3,
+            params_optimizer=optax.adam(1e-3),
+        )
         assert energies.shape[0] > 0
         # Modulate weight: pre_dim=1 (l3[0]), post_dim=error_dim of p1
         # p1 = Predict(l2, l1), error dim = l1.dim = 10

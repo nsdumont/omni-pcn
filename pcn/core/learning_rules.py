@@ -1,21 +1,18 @@
-"""
-Learning rule classes for Project and Modulate connections.
+"""Learning rule classes for Project and Modulate connections.
 
 These define how weights are updated for non-PC connections. Each rule has a
 type_id used to select the update computation in the backend.
 """
 
-from typing import Callable, Any
-
 
 class LearningRule:
-    """
-    Base class for learning rules.
+    """Base class for learning rules.
 
     Subclasses must define:
         type_id: int - identifier for backend switch statements
         learning_rate: float - learning rate for weight updates
     """
+
     type_id: int = 0
     learning_rate: float = 1e-3
 
@@ -24,8 +21,7 @@ class LearningRule:
 
 
 class Hebbian(LearningRule):
-    """
-    Standard Hebbian learning rule.
+    """Standard Hebbian learning rule.
 
     Weight update: dW = learning_rate * post @ pre.T
 
@@ -33,7 +29,9 @@ class Hebbian(LearningRule):
 
     Args:
         learning_rate: Learning rate for weight updates (default: 1e-3)
+
     """
+
     type_id = 0
 
     def __init__(self, learning_rate: float = 1e-3):
@@ -41,8 +39,7 @@ class Hebbian(LearningRule):
 
 
 class ThreeFactorHebbian(LearningRule):
-    """
-    Three-factor Hebbian learning with reward modulation.
+    """Three-factor Hebbian learning with reward modulation.
 
     Weight update: dW = learning_rate * reward * post @ pre.T
 
@@ -68,7 +65,9 @@ class ThreeFactorHebbian(LearningRule):
             learning_rate=1e-4,
             reward_fn=((l_out.value, 'label'), neg_mse),
         )
+
     """
+
     type_id = 1
 
     def __init__(self, learning_rate: float = 1e-3, reward_fn=None):
@@ -77,7 +76,8 @@ class ThreeFactorHebbian(LearningRule):
             if not (isinstance(reward_fn, tuple) and len(reward_fn) == 2):
                 raise ValueError(
                     "reward_fn must be an (inputs, fn) tuple, e.g. "
-                    "((node_ref, 'label'), my_fn). Got: " + repr(reward_fn))
+                    "((node_ref, 'label'), my_fn). Got: " + repr(reward_fn)
+                )
             self.reward_fn_inputs, self.reward_fn_callable = reward_fn
         else:
             self.reward_fn_inputs = None
@@ -92,8 +92,7 @@ class ThreeFactorHebbian(LearningRule):
 
 
 class Oja(LearningRule):
-    """
-    Oja's learning rule — Hebbian with weight normalization.
+    """Oja's learning rule — Hebbian with weight normalization.
 
     Weight update: dW = learning_rate * (post @ pre.T - post^2 * W)
 
@@ -103,7 +102,9 @@ class Oja(LearningRule):
 
     Args:
         learning_rate: Learning rate for weight updates (default: 1e-3)
+
     """
+
     type_id = 3
 
     def __init__(self, learning_rate: float = 1e-3):
@@ -111,13 +112,13 @@ class Oja(LearningRule):
 
 
 class NoLearning(LearningRule):
-    """
-    No weight updates. For fixed connections (e.g., identity/residual shortcuts).
+    """No weight updates. For fixed connections (e.g., identity/residual shortcuts).
 
     Weights initialized with init_weight on Project/Modulate remain frozen.
 
     type_id = -1 (not matched by any learning branch in the backend).
     """
+
     type_id = -1
 
     def __init__(self):
@@ -125,8 +126,7 @@ class NoLearning(LearningRule):
 
 
 class GradientDescent(LearningRule):
-    """
-    Gradient descent on a custom loss.
+    """Gradient descent on a custom loss.
 
     ``loss_fn`` is **required**: it specifies which arrays to pass to the loss
     function, using the same ``(inputs, fn)`` pattern as ``record_map``. The
@@ -157,7 +157,9 @@ class GradientDescent(LearningRule):
             loss_fn=((p_out.error, 'label'), my_ce_loss),
         )
         Project(pre, post, update_rule=loss)
+
     """
+
     type_id = 2
 
     def __init__(self, loss_fn=None):
@@ -168,11 +170,13 @@ class GradientDescent(LearningRule):
                 "e.g. ((node_ref, 'label'), my_fn). The energy-based path "
                 "(no loss_fn) has been removed; use Hebbian, Oja, or "
                 "ThreeFactorHebbian to learn Project/Modulate weights without "
-                "an explicit loss.")
+                "an explicit loss."
+            )
         if not (isinstance(loss_fn, tuple) and len(loss_fn) == 2):
             raise ValueError(
                 "loss_fn must be a (inputs, fn) tuple, e.g. "
-                "((node_ref, 'label'), my_fn). Got: " + repr(loss_fn))
+                "((node_ref, 'label'), my_fn). Got: " + repr(loss_fn)
+            )
         self.loss_fn_inputs, self.loss_fn_callable = loss_fn
 
     @property

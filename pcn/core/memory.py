@@ -1,5 +1,4 @@
-"""
-Memory (Legendre Memory Unit / HiPPO) module for PCN.
+"""Memory (Legendre Memory Unit / HiPPO) module for PCN.
 
 ``Memory`` is a composite built from a layer plus fixed-weight ``Project``
 connections. It maintains an online polynomial projection of an input signal's
@@ -56,16 +55,14 @@ Weights are fixed (``NoLearning``) for now; learnable dynamics are a future
 extension (swap to a GD-loss rule or expose ``Ā, B̄`` as trainable).
 """
 
-from typing import Optional, Union
-
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 from scipy.linalg import expm
 
-from .layer import Layer, NodeRef
 from .activations import Direct
-from .learning_rules import NoLearning
 from .connections import Project
+from .layer import Layer, NodeRef
+from .learning_rules import NoLearning
 
 
 def _legt_matrices(d: int):
@@ -81,7 +78,7 @@ def _legt_matrices(d: int):
     i = np.arange(d)[:, None]
     j = np.arange(d)[None, :]
     exp = i - j + 1
-    signs = np.where(exp % 2 == 0, 1.0, -1.0)          # (−1)^{i−j+1}, integer-safe
+    signs = np.where(exp % 2 == 0, 1.0, -1.0)  # (−1)^{i−j+1}, integer-safe
     A = (2 * i + 1) * np.where(i < j, -1.0, signs)
     B = ((2 * np.arange(d) + 1) * ((-1.0) ** np.arange(d))).reshape(d, 1)
     return A.astype(np.float64), B.astype(np.float64)
@@ -100,9 +97,9 @@ def _lagt_matrices(d: int):
 
 
 _BASES = {
-    'legt': _legt_matrices,
-    'lmu': _legt_matrices,   # alias
-    'lagt': _lagt_matrices,
+    "legt": _legt_matrices,
+    "lmu": _legt_matrices,  # alias
+    "lagt": _lagt_matrices,
 }
 
 
@@ -157,33 +154,31 @@ class Memory:
         projects: List of created ``Project`` connections.
 
     Use ``Memory.value`` as the ``pre`` of readout ``Predict`` connections.
+
     """
 
     def __init__(
         self,
-        input: Union[Layer, NodeRef],
+        input: Layer | NodeRef,
         dims_per_input: int,
-        memory_type: str = 'legt',
+        memory_type: str = "legt",
         theta: float = 1.0,
         dt: float = 1.0,
-        mode: str = 'deterministic',
-        advance: str = 'iteration',
-        label: Optional[str] = None,
+        mode: str = "deterministic",
+        advance: str = "iteration",
+        label: str | None = None,
     ):
         from .network import _get_current_network
-        net = _get_current_network()
+
+        _get_current_network()
 
         mt = memory_type.lower()
         if mt not in _BASES:
-            raise ValueError(
-                f"Unknown memory_type {memory_type!r}; choices: "
-                f"{sorted(_BASES)}")
-        if mode not in ('deterministic', 'energy_coupled'):
-            raise ValueError(
-                f"mode must be 'deterministic' or 'energy_coupled', got {mode!r}")
-        if advance not in ('iteration', 'timestep'):
-            raise ValueError(
-                f"advance must be 'iteration' or 'timestep', got {advance!r}")
+            raise ValueError(f"Unknown memory_type {memory_type!r}; choices: {sorted(_BASES)}")
+        if mode not in ("deterministic", "energy_coupled"):
+            raise ValueError(f"mode must be 'deterministic' or 'energy_coupled', got {mode!r}")
+        if advance not in ("iteration", "timestep"):
+            raise ValueError(f"advance must be 'iteration' or 'timestep', got {advance!r}")
         if dims_per_input < 1:
             raise ValueError("dims_per_input must be >= 1")
         if theta <= 0 or dt <= 0:
@@ -192,9 +187,7 @@ class Memory:
         # Resolve the input node and its channel count.
         input_node = input.value if isinstance(input, Layer) else input
         if not isinstance(input_node, NodeRef):
-            raise TypeError(
-                "Memory input must be a Layer or NodeRef, got "
-                f"{type(input).__name__}")
+            raise TypeError(f"Memory input must be a Layer or NodeRef, got {type(input).__name__}")
         n = input_node.dim
 
         self.input = input_node
@@ -206,7 +199,7 @@ class Memory:
         self.input_dim = n
         self.d = int(dims_per_input)
         self.dim = n * self.d
-        self.label = label or 'memory'
+        self.label = label or "memory"
 
         # --- dynamics (host-side) -------------------------------------------
         A, B = _BASES[mt](self.d)
@@ -216,49 +209,65 @@ class Memory:
 
         eye_n = np.eye(n)
         # Block-diagonal over channels: each channel an independent d-dim memory.
-        Abar_full = np.kron(eye_n, Abar)            # (D, D)
-        Bbar_full = np.kron(eye_n, Bbar)            # (D, n)
-        S_full = Abar_full - np.eye(self.dim)       # self-Project weight (Ā−I)
+        Abar_full = np.kron(eye_n, Abar)  # (D, D)
+        Bbar_full = np.kron(eye_n, Bbar)  # (D, n)
+        S_full = Abar_full - np.eye(self.dim)  # self-Project weight (Ā−I)
         self._Abar_full = Abar_full
         self._Bbar_full = Bbar_full
 
         # --- graph ----------------------------------------------------------
         self.projects = []
-        self.recurrent = Layer(
-            dim=self.dim, activation=Direct(), label=f"{self.label}_rec")
+        self.recurrent = Layer(dim=self.dim, activation=Direct(), label=f"{self.label}_rec")
 
         # Recurrence (Jacobi: order-independent): m += (Ā−I)m + B̄u  ⇒  Ā m + B̄ u.
         # advance='timestep' gates these so the memory steps once per input frame
         # (held while downstream relaxes); 'iteration' is the historical behavior.
-        self.projects.append(Project(
-            self.recurrent.value, self.recurrent.value,
-            update_rule=NoLearning(),
-            init_weight=jnp.asarray(S_full, dtype=jnp.float32),
-            advance=advance,
-            label=f"{self.label}_self"))
-        self.projects.append(Project(
-            self.input, self.recurrent.value,
-            update_rule=NoLearning(),
-            init_weight=jnp.asarray(Bbar_full, dtype=jnp.float32),
-            advance=advance,
-            label=f"{self.label}_input"))
+        self.projects.append(
+            Project(
+                self.recurrent.value,
+                self.recurrent.value,
+                update_rule=NoLearning(),
+                init_weight=jnp.asarray(S_full, dtype=jnp.float32),
+                advance=advance,
+                label=f"{self.label}_self",
+            )
+        )
+        self.projects.append(
+            Project(
+                self.input,
+                self.recurrent.value,
+                update_rule=NoLearning(),
+                init_weight=jnp.asarray(Bbar_full, dtype=jnp.float32),
+                advance=advance,
+                label=f"{self.label}_input",
+            )
+        )
 
-        if mode == 'deterministic':
+        if mode == "deterministic":
             # Output mirror: out += −I·out + I·rec  ⇒  out = rec (+ readout energy).
             # Kept per-iteration (NOT gated): under advance='timestep' the recurrent
             # state is held within a frame, so the mirror simply tracks it each
             # iteration; gating it too would lag the readout by one frame.
-            self.output = Layer(
-                dim=self.dim, activation=Direct(), label=f"{self.label}_out")
+            self.output = Layer(dim=self.dim, activation=Direct(), label=f"{self.label}_out")
             eye_D = jnp.eye(self.dim, dtype=jnp.float32)
-            self.projects.append(Project(
-                self.output.value, self.output.value,
-                update_rule=NoLearning(), init_weight=-eye_D,
-                label=f"{self.label}_out_leak"))
-            self.projects.append(Project(
-                self.recurrent.value, self.output.value,
-                update_rule=NoLearning(), init_weight=eye_D,
-                label=f"{self.label}_out_copy"))
+            self.projects.append(
+                Project(
+                    self.output.value,
+                    self.output.value,
+                    update_rule=NoLearning(),
+                    init_weight=-eye_D,
+                    label=f"{self.label}_out_leak",
+                )
+            )
+            self.projects.append(
+                Project(
+                    self.recurrent.value,
+                    self.output.value,
+                    update_rule=NoLearning(),
+                    init_weight=eye_D,
+                    label=f"{self.label}_out_copy",
+                )
+            )
             self._value_layer = self.output
         else:
             self.output = None
@@ -271,7 +280,8 @@ class Memory:
     @property
     def value(self) -> NodeRef:
         """The value node to read downstream (output mirror in deterministic
-        mode, recurrent state in energy_coupled mode)."""
+        mode, recurrent state in energy_coupled mode).
+        """
         return self._value_layer.value
 
     def __getitem__(self, key):
@@ -284,23 +294,25 @@ class Memory:
 
     def _channel_C(self, t):
         """Per-channel readout vector ``c (d,)`` reconstructing the input
-        delayed by time ``t`` (``0 ≤ t ≤ θ``). LegT only."""
-        if self.memory_type not in ('legt', 'lmu'):
+        delayed by time ``t`` (``0 ≤ t ≤ θ``). LegT only.
+        """
+        if self.memory_type not in ("legt", "lmu"):
             raise NotImplementedError(
                 "C(t)/decode is only implemented for the Legendre (legt/lmu) "
-                f"basis; got memory_type={self.memory_type!r}.")
+                f"basis; got memory_type={self.memory_type!r}."
+            )
         from scipy.special import eval_legendre
+
         r = float(t) / self.theta
         if not 0.0 <= r <= 1.0:
-            raise ValueError(
-                f"delay t={t} must be in [0, theta={self.theta}]")
+            raise ValueError(f"delay t={t} must be in [0, theta={self.theta}]")
         x = 2.0 * r - 1.0  # map window fraction to shifted-Legendre argument
-        return np.array([eval_legendre(i, x) for i in range(self.d)],
-                        dtype=np.float64)
+        return np.array([eval_legendre(i, x) for i in range(self.d)], dtype=np.float64)
 
     def C(self, t) -> jnp.ndarray:
         """Readout matrix ``(input_dim, D)`` reconstructing the input delayed by
-        time ``t`` from the memory state: ``û(t_now − t) = C(t) @ m``."""
+        time ``t`` from the memory state: ``û(t_now − t) = C(t) @ m``.
+        """
         c = self._channel_C(t)
         C_full = np.kron(np.eye(self.input_dim), c.reshape(1, self.d))
         return jnp.asarray(C_full, dtype=jnp.float32)
@@ -315,11 +327,14 @@ class Memory:
 
         Returns:
             ``(..., input_dim)`` reconstruction ``û(t_now − t)``.
+
         """
-        C_full = self.C(t)                 # (input_dim, D)
-        return jnp.asarray(m) @ C_full.T   # (..., input_dim)
+        C_full = self.C(t)  # (input_dim, D)
+        return jnp.asarray(m) @ C_full.T  # (..., input_dim)
 
     def __repr__(self):
-        return (f"Memory({self.memory_type}, input_dim={self.input_dim}, "
-                f"d={self.d}, D={self.dim}, theta={self.theta}, dt={self.dt}, "
-                f"mode={self.mode}, advance={self.advance})")
+        return (
+            f"Memory({self.memory_type}, input_dim={self.input_dim}, "
+            f"d={self.d}, D={self.dim}, theta={self.theta}, dt={self.dt}, "
+            f"mode={self.mode}, advance={self.advance})"
+        )

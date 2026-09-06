@@ -1,5 +1,4 @@
-"""
-Activation function classes for PCN layers and transformations.
+"""Activation function classes for PCN layers and transformations.
 
 Each activation has a ``type_id`` used as the index into :data:`ACTIVATIONS`,
 the canonical tuple of JIT-friendly JAX functions consumed by the backend.
@@ -21,6 +20,7 @@ Activations are used in three places:
    selected via ``transformation='linear-<name>'`` on Predict / Project /
    Modulate (e.g. ``'linear-relu'``, ``'linear-softplus'``).
 """
+
 import jax
 import jax.numpy as jnp
 
@@ -47,9 +47,10 @@ class Activation:
     passed as JIT-static arguments to the backend without forcing a retrace
     on every call.
     """
+
     type_id: int = 0
-    init_type: str = 'xavier'
-    init_scale: float = 1.
+    init_type: str = "xavier"
+    init_scale: float = 1.0
     has_memory: bool = False
     needs_key: bool = False
 
@@ -82,9 +83,10 @@ class Activation:
 
 class Direct(Activation):
     """Identity activation: f(x) = x."""
+
     type_id = 0
-    init_type = 'xavier'
-    init_scale = 1.
+    init_type = "xavier"
+    init_scale = 1.0
 
     @staticmethod
     def fn(x):
@@ -93,8 +95,9 @@ class Direct(Activation):
 
 class Relu(Activation):
     """f(x) = max(0, x)."""
+
     type_id = 1
-    init_type = 'he'
+    init_type = "he"
     init_scale = jnp.sqrt(2)
 
     @staticmethod
@@ -113,9 +116,10 @@ class Softmax(Activation):
     distribution more confident — but note (exp-gen-05 phase 4) that an
     aggressive T also stiffens the value-inference dynamics.
     """
+
     type_id = 2
-    init_type = 'xavier'
-    init_scale = 4.
+    init_type = "xavier"
+    init_scale = 4.0
 
     def __init__(self, temperature: float = 1.0):
         t = float(temperature)
@@ -128,7 +132,7 @@ class Softmax(Activation):
         return jax.nn.softmax(x, axis=-1)
 
     def _state(self):
-        return ('Softmax', self.temperature)
+        return ("Softmax", self.temperature)
 
     def __repr__(self):
         return f"Softmax(temperature={self.temperature})"
@@ -136,9 +140,10 @@ class Softmax(Activation):
 
 class Tanh(Activation):
     """f(x) = tanh(x)."""
+
     type_id = 3
-    init_type = 'xavier'
-    init_scale = 1.
+    init_type = "xavier"
+    init_scale = 1.0
 
     @staticmethod
     def fn(x):
@@ -147,9 +152,10 @@ class Tanh(Activation):
 
 class HardTanh(Activation):
     """f(x) = clip(x, -1, 1) — piecewise-linear tanh."""
+
     type_id = 13
-    init_type = 'xavier'
-    init_scale = 1.
+    init_type = "xavier"
+    init_scale = 1.0
 
     @staticmethod
     def fn(x):
@@ -158,9 +164,10 @@ class HardTanh(Activation):
 
 class Sigmoid(Activation):
     """f(x) = 1 / (1 + exp(-x))."""
+
     type_id = 4
-    init_type = 'xavier'
-    init_scale = 4.
+    init_type = "xavier"
+    init_scale = 4.0
 
     @staticmethod
     def fn(x):
@@ -169,9 +176,10 @@ class Sigmoid(Activation):
 
 class LeakyRelu(Activation):
     """f(x) = x if x > 0 else 0.01 * x."""
+
     type_id = 5
-    init_type = 'he'
-    init_scale = jnp.sqrt(2 / (1 + 0.01 ** 2))
+    init_type = "he"
+    init_scale = jnp.sqrt(2 / (1 + 0.01**2))
 
     @staticmethod
     def fn(x):
@@ -180,9 +188,10 @@ class LeakyRelu(Activation):
 
 class Gelu(Activation):
     """f(x) = x * Phi(x) (Gaussian Error Linear Unit)."""
+
     type_id = 6
-    init_type = 'he'
-    init_scale = 1.
+    init_type = "he"
+    init_scale = 1.0
 
     @staticmethod
     def fn(x):
@@ -191,9 +200,10 @@ class Gelu(Activation):
 
 class Elu(Activation):
     """f(x) = x if x > 0 else exp(x) - 1."""
+
     type_id = 7
-    init_type = 'he'
-    init_scale = 1.
+    init_type = "he"
+    init_scale = 1.0
 
     @staticmethod
     def fn(x):
@@ -202,8 +212,9 @@ class Elu(Activation):
 
 class Sin(Activation):
     """f(x) = sin(x). Pairs with the SIREN-style init."""
+
     type_id = 8
-    init_type = 'siren'
+    init_type = "siren"
     init_scale = jnp.sqrt(6)
 
     @staticmethod
@@ -213,9 +224,10 @@ class Sin(Activation):
 
 class Softplus(Activation):
     """f(x) = log(1 + exp(x)). Smooth positive output, bounded gradient."""
+
     type_id = 9
-    init_type = 'xavier'
-    init_scale = 1.
+    init_type = "xavier"
+    init_scale = 1.0
 
     @staticmethod
     def fn(x):
@@ -224,13 +236,14 @@ class Softplus(Activation):
 
 class Exp(Activation):
     """f(x) = exp(clip(x, -10, 10)). Positive output; clip avoids overflow."""
+
     type_id = 10
-    init_type = 'xavier'
-    init_scale = 1.
+    init_type = "xavier"
+    init_scale = 1.0
 
     @staticmethod
     def fn(x):
-        return jnp.exp(jnp.clip(x, -10., 10.))
+        return jnp.exp(jnp.clip(x, -10.0, 10.0))
 
 
 def _nwta(x, num_winners):
@@ -249,7 +262,7 @@ def _nwta(x, num_winners):
     d = x.shape[-1]
     if k <= 0 or k >= d:
         return x
-    thresh = jax.lax.top_k(x, k)[0][..., -1:]   # (..., 1) k-th largest per row
+    thresh = jax.lax.top_k(x, k)[0][..., -1:]  # (..., 1) k-th largest per row
     return jnp.where(x >= thresh, x, 0.0)
 
 
@@ -270,10 +283,12 @@ class NWTA(Activation):
 
     Args:
         num_winners: Number of neurons kept active per sample (``N_w``).
+
     """
+
     type_id = 12
-    init_type = 'xavier'
-    init_scale = 1.
+    init_type = "xavier"
+    init_scale = 1.0
 
     def __init__(self, num_winners: int = 15):
         nw = int(num_winners)
@@ -291,7 +306,7 @@ class NWTA(Activation):
         return _nwta(x, self.num_winners)
 
     def _state(self):
-        return ('NWTA', self.num_winners)
+        return ("NWTA", self.num_winners)
 
     def __repr__(self):
         return f"NWTA(num_winners={self.num_winners})"
@@ -313,9 +328,10 @@ class LayerNorm(Activation):
     scale-invariant (multiplying the value by a constant leaves the output
     unchanged), so it is safe to read at any inference iteration.
     """
+
     type_id = 11
-    init_type = 'xavier'
-    init_scale = 1.
+    init_type = "xavier"
+    init_scale = 1.0
     eps = 1e-5
 
     @staticmethod
@@ -326,8 +342,7 @@ class LayerNorm(Activation):
 
 
 class Poisson(Activation):
-    """
-    Linear-Nonlinear-Poisson (LNP) neuron model.
+    """Linear-Nonlinear-Poisson (LNP) neuron model.
 
     Applies an inner activation to get firing rates, then samples spike
     counts from a Poisson distribution parameterized by those rates.
@@ -341,14 +356,14 @@ class Poisson(Activation):
 
     Args:
         activation: The nonlinearity (N in LNP). Defaults to Relu().
+
     """
 
-    def __init__(self, activation: 'Activation' = None):
+    def __init__(self, activation: "Activation" = None):
         if activation is None:
             activation = Relu()
         if isinstance(activation, MemoryActivation):
-            raise ValueError(
-                "Poisson cannot wrap a memory activation; pass a stateless one")
+            raise ValueError("Poisson cannot wrap a memory activation; pass a stateless one")
         self.activation = activation
         # Delegate to the inner activation so weight init and gradients use
         # the smooth nonlinearity; spike sampling happens in the backend.
@@ -358,7 +373,7 @@ class Poisson(Activation):
         self.fn = activation.fn
 
     def _state(self):
-        return ('Poisson', self.activation._state())
+        return ("Poisson", self.activation._state())
 
     def __repr__(self):
         return f"Poisson({self.activation!r})"
@@ -367,6 +382,7 @@ class Poisson(Activation):
 # ----------------------------------------------------------------------------
 # Memory-aware activations
 # ----------------------------------------------------------------------------
+
 
 class MemoryActivation(Activation):
     """Base class for activations that read a previous-iteration value.
@@ -382,17 +398,18 @@ class MemoryActivation(Activation):
     backend supplies the previous-iteration activated value from the
     inference loop carry (zeros on the very first iteration).
     """
+
     has_memory: bool = True
 
     def fn(self, x, prev):
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement fn(x, prev)")
+        raise NotImplementedError(f"{type(self).__name__} must implement fn(x, prev)")
 
     def apply(self, x, prev=None):
         if prev is None:
             raise ValueError(
                 f"{type(self).__name__} requires a non-None prev; the "
-                "backend must thread the previous activated value here")
+                "backend must thread the previous activated value here"
+            )
         return self.fn(x, jax.lax.stop_gradient(prev))
 
 
@@ -412,15 +429,16 @@ class Leaky(MemoryActivation):
             "fresh" component of each step. Defaults to :class:`Direct`.
         leak: Float in ``[0, 1]``. The fraction of the previous output
             mixed into the current one.
+
     """
 
-    def __init__(self, base: 'Activation' = None, leak: float = 0.1):
+    def __init__(self, base: "Activation" = None, leak: float = 0.1):
         if base is None:
             base = Direct()
         if isinstance(base, MemoryActivation):
             raise ValueError(
-                "Leaky.base must be a stateless activation, not another "
-                "MemoryActivation")
+                "Leaky.base must be a stateless activation, not another MemoryActivation"
+            )
         leak = float(leak)
         if not 0.0 <= leak <= 1.0:
             raise ValueError(f"leak must be in [0, 1], got {leak}")
@@ -435,7 +453,7 @@ class Leaky(MemoryActivation):
         return self.leak * prev + (1.0 - self.leak) * self.base.fn(x)
 
     def _state(self):
-        return ('Leaky', self.base._state(), self.leak)
+        return ("Leaky", self.base._state(), self.leak)
 
     def __repr__(self):
         return f"Leaky({self.base!r}, leak={self.leak})"
@@ -444,6 +462,7 @@ class Leaky(MemoryActivation):
 # ----------------------------------------------------------------------------
 # Stochastic (noise-injecting) activations
 # ----------------------------------------------------------------------------
+
 
 def gaussian_noise(key, shape, sigma=1.0):
     """Default noise sampler for :class:`Stochastic`: i.i.d. Gaussian.
@@ -466,11 +485,11 @@ class StochasticActivation(Activation):
     Backend dispatch: ``needs_key == True`` is checked at trace time. The
     backend folds a fresh per-iteration / per-node key into ``apply``.
     """
+
     needs_key: bool = True
 
     def fn(self, x, key):
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement fn(x, key)")
+        raise NotImplementedError(f"{type(self).__name__} must implement fn(x, key)")
 
     def apply(self, x, key=None):
         if key is None:
@@ -479,8 +498,7 @@ class StochasticActivation(Activation):
 
     def deterministic(self, x):
         """Noise-free output, used when no key is available. Override."""
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement deterministic(x)")
+        raise NotImplementedError(f"{type(self).__name__} must implement deterministic(x)")
 
 
 class Stochastic(StochasticActivation):
@@ -503,15 +521,17 @@ class Stochastic(StochasticActivation):
         **noise_params: Keyword parameters forwarded to ``noise_fn`` (e.g.
             ``sigma=1.0`` for the default Gaussian). Must be hashable so the
             instance stays usable as a JIT-static argument.
+
     """
 
-    def __init__(self, base: 'Activation' = None, noise_fn=None, **noise_params):
+    def __init__(self, base: "Activation" = None, noise_fn=None, **noise_params):
         if base is None:
             base = Direct()
         if isinstance(base, (MemoryActivation, StochasticActivation)):
             raise ValueError(
                 "Stochastic.base must be a stateless activation, not another "
-                "memory-aware or stochastic activation")
+                "memory-aware or stochastic activation"
+            )
         self.base = base
         self.noise_fn = noise_fn if noise_fn is not None else gaussian_noise
         # Stored as a sorted tuple of items so the instance stays hashable.
@@ -529,31 +549,29 @@ class Stochastic(StochasticActivation):
         return y + self.noise_fn(key, y.shape, **dict(self.noise_params))
 
     def _state(self):
-        return ('Stochastic', self.base._state(), self.noise_fn,
-                self.noise_params)
+        return ("Stochastic", self.base._state(), self.noise_fn, self.noise_params)
 
     def __repr__(self):
         params = dict(self.noise_params)
-        return (f"Stochastic({self.base!r}, noise_fn={self.noise_fn.__name__}, "
-                f"{params})")
+        return f"Stochastic({self.base!r}, noise_fn={self.noise_fn.__name__}, {params})"
 
 
 # Ordered list of activation classes — index = type_id.
 _ACTIVATION_CLASSES = (
-    Direct,      # 0
-    Relu,        # 1
-    Softmax,     # 2
-    Tanh,        # 3
-    Sigmoid,     # 4
-    LeakyRelu,   # 5
-    Gelu,        # 6
-    Elu,         # 7
-    Sin,         # 8
-    Softplus,    # 9
-    Exp,         # 10
-    LayerNorm,   # 11
-    NWTA,        # 12
-    HardTanh,    # 13
+    Direct,  # 0
+    Relu,  # 1
+    Softmax,  # 2
+    Tanh,  # 3
+    Sigmoid,  # 4
+    LeakyRelu,  # 5
+    Gelu,  # 6
+    Elu,  # 7
+    Sin,  # 8
+    Softplus,  # 9
+    Exp,  # 10
+    LayerNorm,  # 11
+    NWTA,  # 12
+    HardTanh,  # 13
 )
 
 # Canonical activation function tuple, indexed by type_id. Imported by the
@@ -596,11 +614,9 @@ def activation_from_name(name: str) -> Activation:
 
     Raises:
         ValueError: If *name* is not in :data:`ACTIVATION_REGISTRY`.
+
     """
     cls = ACTIVATION_REGISTRY.get(name.lower())
     if cls is None:
-        raise ValueError(
-            f"Unknown activation: {name!r}. "
-            f"Valid: {list(ACTIVATION_REGISTRY)}"
-        )
+        raise ValueError(f"Unknown activation: {name!r}. Valid: {list(ACTIVATION_REGISTRY)}")
     return cls()

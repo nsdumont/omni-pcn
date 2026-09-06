@@ -1,23 +1,24 @@
-"""
-BackpropSimulation: standard backprop baseline using the same network topology.
+"""BackpropSimulation: standard backprop baseline using the same network topology.
 
 Forward pass through predict connections + optax.adam weight updates,
 with a user-provided objective function. No PCN dynamics.
 """
 
-from typing import Any, Dict, Optional, Union, Iterator
+import time
+from collections.abc import Iterator
+from typing import Any
+
 import jax.numpy as jnp
 import optax
-import time
 from tqdm import tqdm
-from .core.network import PCNetwork
-from .core.layer import Layer, NodeRef
+
 from .backend.backprop_simulation import run_backprop_batch
+from .core.layer import Layer, NodeRef
+from .core.network import PCNetwork
 
 
 class BackpropSimulation:
-    """
-    Backprop baseline using the same network graph as PCN.
+    """Backprop baseline using the same network graph as PCN.
 
     Runs a standard forward pass through predict connections (ignoring
     errors and precisions), computes a user-provided loss, and updates
@@ -41,6 +42,7 @@ class BackpropSimulation:
         sim.train(train_loader, data_map={l_input: 'image'}, epochs=10)
         results = sim.test(test_loader, data_map={l_input: 'image'},
                            record_map={(l_output.value, 'label'): accuracy_fn})
+
     """
 
     def __init__(
@@ -51,8 +53,7 @@ class BackpropSimulation:
     ):
         if net.structure is None:
             raise RuntimeError(
-                "Network must be built before creating BackpropSimulation. "
-                "Call net.build() first."
+                "Network must be built before creating BackpropSimulation. Call net.build() first."
             )
         self.net = net
         self.objective_fn = objective_fn
@@ -101,7 +102,11 @@ class BackpropSimulation:
 
         if isinstance(resolved_key, str):
             return [sample[resolved_key]]
-        elif isinstance(resolved_key, tuple) and len(resolved_key) == 2 and isinstance(resolved_key[0], int):
+        elif (
+            isinstance(resolved_key, tuple)
+            and len(resolved_key) == 2
+            and isinstance(resolved_key[0], int)
+        ):
             node_type, layer_idx = resolved_key
             return [values[layer_idx]]
         elif isinstance(resolved_key, tuple):
@@ -115,14 +120,13 @@ class BackpropSimulation:
 
     def train(
         self,
-        dataloader: Iterator[Dict[str, Any]],
-        data_map: Dict[Union[Layer, int], str],
+        dataloader: Iterator[dict[str, Any]],
+        data_map: dict[Layer | int, str],
         epochs: int = 1,
-        record_map: Optional[Dict[Union[NodeRef, tuple], callable]] = None,
+        record_map: dict[NodeRef | tuple, callable] | None = None,
         verbose: bool = False,
-    ) -> 'BackpropSimulation':
-        """
-        Train with standard backprop.
+    ) -> "BackpropSimulation":
+        """Train with standard backprop.
 
         Args:
             dataloader: Iterable yielding dicts of batched arrays.
@@ -134,6 +138,7 @@ class BackpropSimulation:
 
         Returns:
             self for method chaining.
+
         """
         data_map_tuple = self._convert_map(data_map)
 
@@ -154,9 +159,13 @@ class BackpropSimulation:
                 sample = {k: jnp.array(v) for k, v in sample.items()}
 
                 self.predict_weights, self.opt_state, values, loss = run_backprop_batch(
-                    sample, self.predict_weights,
-                    self.net.structure, data_map_tuple,
-                    self.objective_fn, self.optimizer, self.opt_state,
+                    sample,
+                    self.predict_weights,
+                    self.net.structure,
+                    data_map_tuple,
+                    self.objective_fn,
+                    self.optimizer,
+                    self.opt_state,
                     learning=True,
                 )
 
@@ -173,28 +182,30 @@ class BackpropSimulation:
             train_time = time.time() - epoch_start
             if verbose:
                 import numpy as np
+
                 avg_loss = total_loss / n_samples if n_samples > 0 else 0
-                parts = [f"Epoch {epoch + 1}/{epochs}", f"Avg Loss {avg_loss:.4f}", f"Time {train_time:.1f}s"]
+                parts = [
+                    f"Epoch {epoch + 1}/{epochs}",
+                    f"Avg Loss {avg_loss:.4f}",
+                    f"Time {train_time:.1f}s",
+                ]
                 for name, vals in epoch_records.items():
                     parts.append(f"{name}: {np.mean(vals):.4f}")
                 print(" | ".join(parts))
 
         # Write weights back to network params
-        self.net.params = self.net.params._replace(
-            predict_weights=list(self.predict_weights)
-        )
+        self.net.params = self.net.params._replace(predict_weights=list(self.predict_weights))
         self.train_losses = all_losses
         return self
 
     def test(
         self,
-        dataloader: Iterator[Dict[str, Any]],
-        data_map: Dict[Union[Layer, int], str],
-        record_map: Optional[Dict[Union[NodeRef, tuple], callable]] = None,
+        dataloader: Iterator[dict[str, Any]],
+        data_map: dict[Layer | int, str],
+        record_map: dict[NodeRef | tuple, callable] | None = None,
         verbose: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        Run forward inference and collect results.
+    ) -> dict[str, Any]:
+        """Run forward inference and collect results.
 
         Args:
             dataloader: Iterable yielding dicts of batched arrays.
@@ -204,6 +215,7 @@ class BackpropSimulation:
 
         Returns:
             Dict with 'losses' and one entry per record_map function.
+
         """
         data_map_tuple = self._convert_map(data_map)
 
@@ -219,9 +231,13 @@ class BackpropSimulation:
             sample = {k: jnp.array(v) for k, v in sample.items()}
 
             _, _, values, loss = run_backprop_batch(
-                sample, self.predict_weights,
-                self.net.structure, data_map_tuple,
-                self.objective_fn, self.optimizer, self.opt_state,
+                sample,
+                self.predict_weights,
+                self.net.structure,
+                data_map_tuple,
+                self.objective_fn,
+                self.optimizer,
+                self.opt_state,
                 learning=False,
             )
 
@@ -234,11 +250,12 @@ class BackpropSimulation:
         test_time = time.time() - time_start
         if verbose:
             import numpy as np
+
             avg_loss = np.mean(all_losses)
             parts = [f"Avg Loss {avg_loss:.4f}", f"Time {test_time:.1f}s"]
             for name, vals in results.items():
                 parts.append(f"{name}: {np.mean(vals):.4f}")
             print(" | ".join(parts))
 
-        results['losses'] = all_losses
+        results["losses"] = all_losses
         return results

@@ -1,5 +1,4 @@
-"""
-Fixed visual front-end (retina → V1): ``VisualInput``.
+"""Fixed visual front-end (retina → V1): ``VisualInput``.
 
 Default pipeline (all fixed, FFT-circular-conv based, Metal/CUDA-safe):
 
@@ -19,13 +18,13 @@ The Gabor channels are kept signed but are redundant for reconstruction in v1; a
 joint least-squares inverse that also uses them is a documented future refinement.
 """
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 
-from .base import SensoryTransform, Sequential, SensoryInput
 from . import _filters
+from .base import SensoryInput, SensoryTransform, Sequential
 
 
 class DoGCenterSurround(SensoryTransform):
@@ -35,9 +34,14 @@ class DoGCenterSurround(SensoryTransform):
     OFF (``[−s]_+``) for the signed DoG response ``s``.
     """
 
-    def __init__(self, spatial_shape: Tuple[int, int],
-                 sigma_c: float = 0.8, sigma_s: float = 2.4,
-                 size: int = 9, balance: float = 1.0):
+    def __init__(
+        self,
+        spatial_shape: tuple[int, int],
+        sigma_c: float = 0.8,
+        sigma_s: float = 2.4,
+        size: int = 9,
+        balance: float = 1.0,
+    ):
         h, w = spatial_shape
         self.in_shape = (1, h, w)
         self.out_shape = (2, h, w)
@@ -46,16 +50,16 @@ class DoGCenterSurround(SensoryTransform):
         self._bank = _filters.FFTConvBank([kernel], (h, w))
 
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
-        s = self._bank.apply(x[:, 0])                 # (B, 1, H, W)
-        s = s[:, 0]                                    # (B, H, W)
+        s = self._bank.apply(x[:, 0])  # (B, 1, H, W)
+        s = s[:, 0]  # (B, H, W)
         on = jnp.maximum(s, 0.0)
         off = jnp.maximum(-s, 0.0)
-        return jnp.stack([on, off], axis=1)            # (B, 2, H, W)
+        return jnp.stack([on, off], axis=1)  # (B, 2, H, W)
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
-        s = y[:, 0] - y[:, 1]                           # (B, H, W)  signed DoG resp.
-        x = self._bank.reconstruct(s[:, None])         # (B, H, W)
-        return x[:, None]                              # (B, 1, H, W)
+        s = y[:, 0] - y[:, 1]  # (B, H, W)  signed DoG resp.
+        x = self._bank.reconstruct(s[:, None])  # (B, H, W)
+        return x[:, None]  # (B, 1, H, W)
 
 
 class GaborBank(SensoryTransform):
@@ -68,15 +72,20 @@ class GaborBank(SensoryTransform):
     ``(2, H, W) -> (2 + K, H, W)``.
     """
 
-    def __init__(self, spatial_shape: Tuple[int, int],
-                 orientations: int = 4,
-                 wavelengths: Sequence[float] = (3.0, 6.0),
-                 phases: Sequence[float] = (0.0, jnp.pi / 2),
-                 gamma: float = 0.5, sigma_ratio: float = 0.56):
+    def __init__(
+        self,
+        spatial_shape: tuple[int, int],
+        orientations: int = 4,
+        wavelengths: Sequence[float] = (3.0, 6.0),
+        phases: Sequence[float] = (0.0, jnp.pi / 2),
+        gamma: float = 0.5,
+        sigma_ratio: float = 0.56,
+    ):
         h, w = spatial_shape
         phases = tuple(float(p) for p in phases)
         kernels, index = _filters.gabor_bank_kernels(
-            orientations, wavelengths, phases, gamma, sigma_ratio, (h, w))
+            orientations, wavelengths, phases, gamma, sigma_ratio, (h, w)
+        )
         self.orientations = orientations
         self.n_scales = len(wavelengths)
         self.n_phases = len(phases)
@@ -87,13 +96,13 @@ class GaborBank(SensoryTransform):
         self._bank = _filters.FFTConvBank(kernels, (h, w))
 
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
-        s = x[:, 0] - x[:, 1]                           # (B, H, W)
-        g = self._bank.apply(s)                        # (B, K, H, W)
-        return jnp.concatenate([x, g], axis=1)         # (B, 2+K, H, W)
+        s = x[:, 0] - x[:, 1]  # (B, H, W)
+        g = self._bank.apply(s)  # (B, K, H, W)
+        return jnp.concatenate([x, g], axis=1)  # (B, 2+K, H, W)
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
         # ON/OFF fully determine the signed response; Gabor channels redundant.
-        return y[:, :2]                                # (B, 2, H, W)
+        return y[:, :2]  # (B, 2, H, W)
 
 
 class DivisiveNormalization(SensoryTransform):
@@ -107,8 +116,14 @@ class DivisiveNormalization(SensoryTransform):
     of the reconstruction path when exact ``decode`` matters.
     """
 
-    def __init__(self, spatial_shape: Tuple[int, int], channels: int,
-                 sigma: float = 0.1, pool_sigma: float = 1.0, pool_size: int = 3):
+    def __init__(
+        self,
+        spatial_shape: tuple[int, int],
+        channels: int,
+        sigma: float = 0.1,
+        pool_sigma: float = 1.0,
+        pool_size: int = 3,
+    ):
         h, w = spatial_shape
         self.in_shape = (channels, h, w)
         self.out_shape = (channels, h, w)
@@ -118,8 +133,8 @@ class DivisiveNormalization(SensoryTransform):
         self._pool = _filters.FFTConvBank([pool], (h, w))
 
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
-        energy = jnp.sum(x * x, axis=1)                # (B, H, W)
-        pooled = self._pool.apply(energy)[:, 0]        # (B, H, W)
+        energy = jnp.sum(x * x, axis=1)  # (B, H, W)
+        pooled = self._pool.apply(energy)[:, 0]  # (B, H, W)
         denom = jnp.sqrt(self.sigma * self.sigma + jnp.maximum(pooled, 0.0))
         return x / denom[:, None]
 
@@ -137,9 +152,15 @@ class ComplexEnergy(SensoryTransform):
     ``(C, H, W) -> (C + orientations·n_scales, H, W)``.
     """
 
-    def __init__(self, spatial_shape: Tuple[int, int], in_channels: int,
-                 orientations: int, n_scales: int, n_phases: int = 2,
-                 gabor_offset: int = 2):
+    def __init__(
+        self,
+        spatial_shape: tuple[int, int],
+        in_channels: int,
+        orientations: int,
+        n_scales: int,
+        n_phases: int = 2,
+        gabor_offset: int = 2,
+    ):
         if n_phases < 2:
             raise ValueError("ComplexEnergy needs a quadrature pair (n_phases >= 2)")
         h, w = spatial_shape
@@ -159,13 +180,13 @@ class ComplexEnergy(SensoryTransform):
                 even = x[:, base]
                 odd = x[:, base + 1]
                 outs.append(jnp.sqrt(even * even + odd * odd))
-        return jnp.stack(outs, axis=1)                 # (B, n_energy, H, W)
+        return jnp.stack(outs, axis=1)  # (B, n_energy, H, W)
 
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
         return jnp.concatenate([x, self._energy_channels(x)], axis=1)
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
-        return y[:, :self.in_shape[0]]
+        return y[:, : self.in_shape[0]]
 
 
 # =========================================================================== #
@@ -177,6 +198,7 @@ class ComplexEnergy(SensoryTransform):
 #  channels. See visin_redesign.md.                                           #
 # =========================================================================== #
 
+
 class ColorOpponent(SensoryTransform):
     """Retinal/LGN color-opponent decomposition ``(3,H,W) -> (3,H,W)``.
 
@@ -186,12 +208,16 @@ class ColorOpponent(SensoryTransform):
     opponent signals. Exactly invertible (the matrix is full rank).
     """
 
-    _M = np.array([[0.299, 0.587, 0.114],    # Y   (luma)
-                   [1.0, -1.0, 0.0],          # R−G
-                   [-0.5, -0.5, 1.0]],        # B−Y
-                  dtype=np.float64)
+    _M = np.array(
+        [
+            [0.299, 0.587, 0.114],  # Y   (luma)
+            [1.0, -1.0, 0.0],  # R−G
+            [-0.5, -0.5, 1.0],
+        ],  # B−Y
+        dtype=np.float64,
+    )
 
-    def __init__(self, spatial_shape: Tuple[int, int]):
+    def __init__(self, spatial_shape: tuple[int, int]):
         h, w = spatial_shape
         self.in_shape = (3, h, w)
         self.out_shape = (3, h, w)
@@ -201,10 +227,10 @@ class ColorOpponent(SensoryTransform):
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
         # highest precision: a fixed 3x3 color map should invert exactly, not at
         # TF32 (~2e-3) accuracy; the matmul is tiny so the cost is negligible.
-        return jnp.einsum('oc,bchw->bohw', self._Mf, x, precision='highest')
+        return jnp.einsum("oc,bchw->bohw", self._Mf, x, precision="highest")
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
-        return jnp.einsum('co,bohw->bchw', self._Minv, y, precision='highest')
+        return jnp.einsum("co,bohw->bchw", self._Minv, y, precision="highest")
 
 
 class GaussianBlur(SensoryTransform):
@@ -216,8 +242,13 @@ class GaussianBlur(SensoryTransform):
     documented, like :class:`DivisiveNormalization`).
     """
 
-    def __init__(self, spatial_shape: Tuple[int, int], channels: int,
-                 sigma: float = 2.0, size: Optional[int] = None):
+    def __init__(
+        self,
+        spatial_shape: tuple[int, int],
+        channels: int,
+        sigma: float = 2.0,
+        size: int | None = None,
+    ):
         h, w = spatial_shape
         self.in_shape = (channels, h, w)
         self.out_shape = (channels, h, w)
@@ -230,7 +261,7 @@ class GaussianBlur(SensoryTransform):
 
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
         b, c, h, w = x.shape
-        y = self._bank.apply(x.reshape(b * c, h, w))[:, 0]     # (b*c, H, W)
+        y = self._bank.apply(x.reshape(b * c, h, w))[:, 0]  # (b*c, H, W)
         return y.reshape(b, c, h, w)
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
@@ -246,12 +277,13 @@ class SpatialPool(SensoryTransform):
     ``'max'`` is available but its inverse is cruder.
     """
 
-    def __init__(self, spatial_shape: Tuple[int, int], channels: int,
-                 pool_size: int = 2, mode: str = 'avg'):
+    def __init__(
+        self, spatial_shape: tuple[int, int], channels: int, pool_size: int = 2, mode: str = "avg"
+    ):
         h, w = spatial_shape
         if h % pool_size or w % pool_size:
             raise ValueError(f"pool_size {pool_size} must divide {(h, w)}")
-        if mode not in ('avg', 'max'):
+        if mode not in ("avg", "max"):
             raise ValueError(f"mode must be 'avg' or 'max', got {mode!r}")
         self.in_shape = (channels, h, w)
         self.out_shape = (channels, h // pool_size, w // pool_size)
@@ -262,7 +294,7 @@ class SpatialPool(SensoryTransform):
         b, c, h, w = x.shape
         p = self.p
         g = x.reshape(b, c, h // p, p, w // p, p)
-        return g.max(axis=(3, 5)) if self.mode == 'max' else g.mean(axis=(3, 5))
+        return g.max(axis=(3, 5)) if self.mode == "max" else g.mean(axis=(3, 5))
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
         return jnp.repeat(jnp.repeat(y, self.p, axis=2), self.p, axis=3)
@@ -278,7 +310,7 @@ class ChannelStandardize(SensoryTransform):
     the un-normalized features that :meth:`fit` measures.
     """
 
-    def __init__(self, shape: Tuple[int, ...], scale: Optional[Sequence[float]] = None):
+    def __init__(self, shape: tuple[int, ...], scale: Sequence[float] | None = None):
         self.in_shape = tuple(shape)
         self.out_shape = tuple(shape)
         c = int(shape[0])
@@ -307,8 +339,7 @@ class ChannelSelect(SensoryTransform):
     on ``inverse``).
     """
 
-    def __init__(self, spatial_shape: Tuple[int, int], in_channels: int,
-                 start: int, length: int):
+    def __init__(self, spatial_shape: tuple[int, int], in_channels: int, start: int, length: int):
         h, w = spatial_shape
         self.in_shape = (in_channels, h, w)
         self.out_shape = (length, h, w)
@@ -316,12 +347,12 @@ class ChannelSelect(SensoryTransform):
         self.length = length
 
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
-        return x[:, self.start:self.start + self.length]
+        return x[:, self.start : self.start + self.length]
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
         b, _, h, w = y.shape
         out = jnp.zeros((b,) + self.in_shape)
-        return out.at[:, self.start:self.start + self.length].set(y)
+        return out.at[:, self.start : self.start + self.length].set(y)
 
 
 class ParallelPathways(SensoryTransform):
@@ -339,30 +370,29 @@ class ParallelPathways(SensoryTransform):
     blurred-color approximation — honest for a complex-cell readout.
     """
 
-    def __init__(self, spatial_shape: Tuple[int, int], in_channels: int,
-                 pathways: List[Dict]):
+    def __init__(self, spatial_shape: tuple[int, int], in_channels: int, pathways: list[dict]):
         h, w = spatial_shape
         self.in_shape = (in_channels, h, w)
-        self.out_shape = (sum(p['transform'].out_shape[0] for p in pathways), h, w)
+        self.out_shape = (sum(p["transform"].out_shape[0] for p in pathways), h, w)
         self.pathways = pathways
 
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
         outs = []
         for p in self.pathways:
-            xs = x[:, p['in_start']:p['in_start'] + p['in_len']]
-            outs.append(p['transform']._forward(xs))
+            xs = x[:, p["in_start"] : p["in_start"] + p["in_len"]]
+            outs.append(p["transform"]._forward(xs))
         return jnp.concatenate(outs, axis=1)
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
         recon = jnp.zeros((y.shape[0],) + self.in_shape)
         off = 0
         for p in self.pathways:
-            co = p['transform'].out_shape[0]
-            ys = y[:, off:off + co]
+            co = p["transform"].out_shape[0]
+            ys = y[:, off : off + co]
             off += co
-            if p.get('invertible', False):
-                xs = p['transform']._inverse(ys)
-                recon = recon.at[:, p['in_start']:p['in_start'] + p['in_len']].set(xs)
+            if p.get("invertible", False):
+                xs = p["transform"]._inverse(ys)
+                recon = recon.at[:, p["in_start"] : p["in_start"] + p["in_len"]].set(xs)
         return recon
 
 
@@ -411,91 +441,131 @@ class VisualInput(SensoryInput):
         contrast_norm: insert ``DivisiveNormalization`` (LGN contrast gain).
         complex_energy: legacy — *append* ``ComplexEnergy`` channels (full-res mode).
         activation, label: forwarded to ``SensoryInput``.
+
     """
 
-    def __init__(self, in_shape: Tuple[int, ...] = (1, 28, 28), *,
-                 color: Optional[str] = None,
-                 downsample: int = 1,
-                 complex_cells: bool = False,
-                 keep_lowpass: bool = False,
-                 lowpass_sigma: float = 2.0,
-                 normalize: Optional[str] = 'auto',
-                 orientations: int = 4,
-                 wavelengths: Sequence[float] = (3.0, 6.0),
-                 phases: Sequence[float] = (0.0, jnp.pi / 2),
-                 gamma: float = 0.5, sigma_ratio: float = 0.56,
-                 sigma_c: float = 0.8, sigma_s: float = 2.4,
-                 dog_size: int = 9, dog_balance: float = 1.0,
-                 contrast_norm: bool = False, complex_energy: bool = False,
-                 activation=None, label: Optional[str] = None):
+    def __init__(
+        self,
+        in_shape: tuple[int, ...] = (1, 28, 28),
+        *,
+        color: str | None = None,
+        downsample: int = 1,
+        complex_cells: bool = False,
+        keep_lowpass: bool = False,
+        lowpass_sigma: float = 2.0,
+        normalize: str | None = "auto",
+        orientations: int = 4,
+        wavelengths: Sequence[float] = (3.0, 6.0),
+        phases: Sequence[float] = (0.0, jnp.pi / 2),
+        gamma: float = 0.5,
+        sigma_ratio: float = 0.56,
+        sigma_c: float = 0.8,
+        sigma_s: float = 2.4,
+        dog_size: int = 9,
+        dog_balance: float = 1.0,
+        contrast_norm: bool = False,
+        complex_energy: bool = False,
+        activation=None,
+        label: str | None = None,
+    ):
         if len(in_shape) == 2:
             in_shape = (1,) + tuple(in_shape)
         if len(in_shape) != 3 or in_shape[0] not in (1, 3):
-            raise ValueError(
-                f"in_shape must be (H,W), (1,H,W) or (3,H,W); got {in_shape}")
+            raise ValueError(f"in_shape must be (H,W), (1,H,W) or (3,H,W); got {in_shape}")
         n_in, h, w = in_shape
         hw = (h, w)
         if color is None:
-            color = 'opponent' if n_in == 3 else 'gray'
-        if color not in ('gray', 'opponent'):
+            color = "opponent" if n_in == 3 else "gray"
+        if color not in ("gray", "opponent"):
             raise ValueError(f"color must be 'gray' or 'opponent', got {color!r}")
 
-        encoder = (downsample > 1 or complex_cells or keep_lowpass
-                   or color == 'opponent' or n_in == 3
-                   or normalize not in (None, 'auto'))
-        if normalize == 'auto':
-            normalize = 'std' if encoder else None
-        self._standardize: Optional[ChannelStandardize] = None
+        encoder = (
+            downsample > 1
+            or complex_cells
+            or keep_lowpass
+            or color == "opponent"
+            or n_in == 3
+            or normalize not in (None, "auto")
+        )
+        if normalize == "auto":
+            normalize = "std" if encoder else None
+        self._standardize: ChannelStandardize | None = None
 
         if not encoder:
             # ---- Legacy full-resolution feature map (unchanged v1 behaviour) --
             dog = DoGCenterSurround(hw, sigma_c, sigma_s, dog_size, dog_balance)
             gabor = GaborBank(hw, orientations, wavelengths, phases, gamma, sigma_ratio)
-            stages: List[SensoryTransform] = [dog, gabor]
+            stages: list[SensoryTransform] = [dog, gabor]
             if contrast_norm:
                 stages.append(DivisiveNormalization(hw, gabor.out_shape[0]))
             if complex_energy:
-                stages.append(ComplexEnergy(
-                    hw, in_channels=stages[-1].out_shape[0],
-                    orientations=orientations, n_scales=len(wavelengths),
-                    n_phases=len(phases), gabor_offset=2))
+                stages.append(
+                    ComplexEnergy(
+                        hw,
+                        in_channels=stages[-1].out_shape[0],
+                        orientations=orientations,
+                        n_scales=len(wavelengths),
+                        n_phases=len(phases),
+                        gabor_offset=2,
+                    )
+                )
             super().__init__(Sequential(stages), activation=activation, label=label)
             return
 
         # ---- v2 downsampling encoder -------------------------------------- #
         stages = []
-        if color == 'opponent':
+        if color == "opponent":
             if n_in != 3:
                 raise ValueError("color='opponent' requires a (3,H,W) input")
             stages.append(ColorOpponent(hw))
             pathway_in = 3
-        else:                                            # gray
+        else:  # gray
             pathway_in = 1
             if n_in == 3:
                 raise ValueError("color='gray' requires a (1,H,W) input")
 
         # Luma *form* pathway: DoG -> Gabor (-> complex energy), on channel 0.
-        form_stages: List[SensoryTransform] = [
+        form_stages: list[SensoryTransform] = [
             DoGCenterSurround(hw, sigma_c, sigma_s, dog_size, dog_balance),
-            GaborBank(hw, orientations, wavelengths, phases, gamma, sigma_ratio)]
+            GaborBank(hw, orientations, wavelengths, phases, gamma, sigma_ratio),
+        ]
         if complex_cells:
-            ce = ComplexEnergy(hw, in_channels=form_stages[-1].out_shape[0],
-                               orientations=orientations, n_scales=len(wavelengths),
-                               n_phases=len(phases), gabor_offset=2)
+            ce = ComplexEnergy(
+                hw,
+                in_channels=form_stages[-1].out_shape[0],
+                orientations=orientations,
+                n_scales=len(wavelengths),
+                n_phases=len(phases),
+                gabor_offset=2,
+            )
             form_stages.append(ce)
             # keep only the phase-invariant energy channels (drop raw phase pairs)
-            form_stages.append(ChannelSelect(
-                hw, ce.out_shape[0], ce.out_shape[0] - ce.n_energy, ce.n_energy))
+            form_stages.append(
+                ChannelSelect(hw, ce.out_shape[0], ce.out_shape[0] - ce.n_energy, ce.n_energy)
+            )
         form = Sequential(form_stages)
-        pathways: List[Dict] = [
-            dict(in_start=0, in_len=1, transform=form, invertible=False)]
+        pathways: list[dict] = [
+            {"in_start": 0, "in_len": 1, "transform": form, "invertible": False}
+        ]
 
-        if keep_lowpass:                                 # magnocellular luma DC
-            pathways.append(dict(in_start=0, in_len=1, invertible=True,
-                                 transform=GaussianBlur(hw, 1, lowpass_sigma)))
-        if color == 'opponent':                          # chroma (low bandwidth)
-            pathways.append(dict(in_start=1, in_len=2, invertible=True,
-                                 transform=GaussianBlur(hw, 2, lowpass_sigma)))
+        if keep_lowpass:  # magnocellular luma DC
+            pathways.append(
+                {
+                    "in_start": 0,
+                    "in_len": 1,
+                    "invertible": True,
+                    "transform": GaussianBlur(hw, 1, lowpass_sigma),
+                }
+            )
+        if color == "opponent":  # chroma (low bandwidth)
+            pathways.append(
+                {
+                    "in_start": 1,
+                    "in_len": 2,
+                    "invertible": True,
+                    "transform": GaussianBlur(hw, 2, lowpass_sigma),
+                }
+            )
 
         stages.append(ParallelPathways(hw, pathway_in, pathways))
         c = stages[-1].out_shape[0]
@@ -504,7 +574,7 @@ class VisualInput(SensoryInput):
         if downsample > 1:
             stages.append(SpatialPool(hw, c, downsample))
         hn, wn = h // downsample, w // downsample
-        if normalize == 'std':
+        if normalize == "std":
             self._standardize = ChannelStandardize((c, hn, wn))
             stages.append(self._standardize)
         elif normalize is not None:
@@ -522,7 +592,7 @@ class VisualInput(SensoryInput):
         """
         if self._standardize is None:
             return self
-        feats = self.encode(raw)                          # scale=1 -> pre-norm feats
+        feats = self.encode(raw)  # scale=1 -> pre-norm feats
         c = self.feature_shape[0]
         f = np.asarray(feats).reshape(feats.shape[0], c, -1)
         std = f.std(axis=(0, 2))

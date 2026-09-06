@@ -11,7 +11,7 @@ import optax
 import pytest
 
 import pcn
-from pcn import PCNetwork, Layer, Predict, Simulation
+from pcn import Layer, PCNetwork, Predict, Simulation
 
 
 def _train_identity(init_weight=None, learn_weights=None, epochs=120, seed=1):
@@ -19,23 +19,30 @@ def _train_identity(init_weight=None, learn_weights=None, epochs=120, seed=1):
     net = PCNetwork(seed=seed)
     kw = {}
     if init_weight is not None:
-        kw['init_weight'] = init_weight
+        kw["init_weight"] = init_weight
     if learn_weights is not None:
-        kw['learn_weights'] = learn_weights
+        kw["learn_weights"] = learn_weights
     with net:
-        a = Layer(4, activation=pcn.Direct(), label='a')
-        b = Layer(4, activation=pcn.Direct(), label='b')
-        Predict(a, b, use_bias=False, learn_precision=False, label='w', **kw)
+        a = Layer(4, activation=pcn.Direct(), label="a")
+        b = Layer(4, activation=pcn.Direct(), label="b")
+        Predict(a, b, use_bias=False, learn_precision=False, label="w", **kw)
     net.build()
     sim = Simulation(net)
     rng = np.random.default_rng(seed)
     X = rng.standard_normal((512, 4)).astype(np.float32)
-    tb = [{'a': X[i:i + 64], 'b': X[i:i + 64]} for i in range(0, 512, 64)]
-    sim.train(tb, data_map={a: 'a', b: 'b'}, epochs=epochs, iterations_per_sample=0,
-              learning_iterations_per_sample=4, feedforward_init=True,
-              params_optimizer=optax.adam(3e-2), values_optimizer=optax.sgd(0.5),
-              verbose=False)
-    idx = [c.label for c in net._predict_conns].index('w')
+    tb = [{"a": X[i : i + 64], "b": X[i : i + 64]} for i in range(0, 512, 64)]
+    sim.train(
+        tb,
+        data_map={a: "a", b: "b"},
+        epochs=epochs,
+        iterations_per_sample=0,
+        learning_iterations_per_sample=4,
+        feedforward_init=True,
+        params_optimizer=optax.adam(3e-2),
+        values_optimizer=optax.sgd(0.5),
+        verbose=False,
+    )
+    idx = [c.label for c in net._predict_conns].index("w")
     return np.array(net.params.predict_weights[idx])
 
 
@@ -65,21 +72,27 @@ def test_learn_weights_false_freezes_random_init():
     """learn_weights=False freezes even a random (un-provided) init."""
     net = PCNetwork(seed=3)
     with net:
-        a = Layer(4, activation=pcn.Direct(), label='a')
-        b = Layer(4, activation=pcn.Direct(), label='b')
-        Predict(a, b, use_bias=False, learn_precision=False,
-                learn_weights=False, label='w')
+        a = Layer(4, activation=pcn.Direct(), label="a")
+        b = Layer(4, activation=pcn.Direct(), label="b")
+        Predict(a, b, use_bias=False, learn_precision=False, learn_weights=False, label="w")
     net.build()
-    idx = [c.label for c in net._predict_conns].index('w')
+    idx = [c.label for c in net._predict_conns].index("w")
     W_before = np.array(net.params.predict_weights[idx]).copy()
     sim = Simulation(net)
     rng = np.random.default_rng(3)
     X = rng.standard_normal((256, 4)).astype(np.float32)
-    tb = [{'a': X[i:i + 64], 'b': X[i:i + 64]} for i in range(0, 256, 64)]
-    sim.train(tb, data_map={a: 'a', b: 'b'}, epochs=40, iterations_per_sample=0,
-              learning_iterations_per_sample=4, feedforward_init=True,
-              params_optimizer=optax.adam(3e-2), values_optimizer=optax.sgd(0.5),
-              verbose=False)
+    tb = [{"a": X[i : i + 64], "b": X[i : i + 64]} for i in range(0, 256, 64)]
+    sim.train(
+        tb,
+        data_map={a: "a", b: "b"},
+        epochs=40,
+        iterations_per_sample=0,
+        learning_iterations_per_sample=4,
+        feedforward_init=True,
+        params_optimizer=optax.adam(3e-2),
+        values_optimizer=optax.sgd(0.5),
+        verbose=False,
+    )
     W_after = np.array(net.params.predict_weights[idx])
     np.testing.assert_allclose(W_after, W_before, atol=1e-6)
 

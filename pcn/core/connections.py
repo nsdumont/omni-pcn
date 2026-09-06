@@ -1,5 +1,4 @@
-"""
-Connection classes for predictive coding networks.
+"""Connection classes for predictive coding networks.
 
 Three types of connections:
 - Predict: Standard PC connection (layer -> layer), owns error and precision nodes
@@ -31,13 +30,14 @@ Project and Modulate additionally accept plain Layer objects for
 ``pre``/``post`` (treated as ``layer.value``).
 """
 
-from typing import TYPE_CHECKING, Optional, Union, List
+from typing import TYPE_CHECKING
+
 import numpy as np
 
-from .layer import Layer, NodeRef
-from .learning_rules import LearningRule, Hebbian
-from .activations import Activation, Direct, activation_from_name
 from ..config import _DEFAULT
+from .activations import Activation, Direct, activation_from_name
+from .layer import Layer, NodeRef
+from .learning_rules import Hebbian, LearningRule
 
 
 def _resolve_activation(value, default_instance):
@@ -55,18 +55,22 @@ def _resolve_activation(value, default_instance):
         return value
     raise TypeError(
         f"activation must be an Activation instance, a name string, or None; "
-        f"got {type(value).__name__}")
+        f"got {type(value).__name__}"
+    )
+
 
 if TYPE_CHECKING:
-    from .network import PCNetwork
+    pass
 
 
 # ============================================================================
 # Shared transformation setup
 # ============================================================================
 
-def _parse_conv_params(pre_dim, post_dim, kernel_size, input_shape,
-                       stride, padding, is_transconv=False, pool=None):
+
+def _parse_conv_params(
+    pre_dim, post_dim, kernel_size, input_shape, stride, padding, is_transconv=False, pool=None
+):
     """Parse convolution parameters and compute output shape + channels.
 
     Returns a dict with: in_channels, out_channels, kernel_size, stride,
@@ -88,10 +92,10 @@ def _parse_conv_params(pre_dim, post_dim, kernel_size, input_shape,
     sH, sW = stride
 
     if is_transconv:
-        if padding == 'SAME':
+        if padding == "SAME":
             H_out = H_in * sH
             W_out = W_in * sW
-        elif padding == 'VALID':
+        elif padding == "VALID":
             H_out = (H_in - 1) * sH + kH
             W_out = (W_in - 1) * sW + kW
         else:
@@ -100,10 +104,10 @@ def _parse_conv_params(pre_dim, post_dim, kernel_size, input_shape,
             H_out = (H_in - 1) * sH + kH - pH_lo - pH_hi
             W_out = (W_in - 1) * sW + kW - pW_lo - pW_hi
     else:
-        if padding == 'SAME':
+        if padding == "SAME":
             H_out = -(-H_in // sH)
             W_out = -(-W_in // sW)
-        elif padding == 'VALID':
+        elif padding == "VALID":
             H_out = (H_in - kH) // sH + 1
             W_out = (W_in - kW) // sW + 1
         else:
@@ -119,7 +123,8 @@ def _parse_conv_params(pre_dim, post_dim, kernel_size, input_shape,
         if H_out < pH or W_out < pW:
             raise ValueError(
                 f"pool window ({pH}, {pW}) is larger than the conv output "
-                f"({H_out}, {W_out}); reduce the pool size or stride.")
+                f"({H_out}, {W_out}); reduce the pool size or stride."
+            )
         H_out = (H_out - pH) // psH + 1
         W_out = (W_out - pW) // psW + 1
 
@@ -129,21 +134,21 @@ def _parse_conv_params(pre_dim, post_dim, kernel_size, input_shape,
 
     if pre_dim % spatial_in != 0:
         raise ValueError(
-            f"pre_dim={pre_dim} not divisible by input spatial "
-            f"{H_in}*{W_in}={spatial_in}")
+            f"pre_dim={pre_dim} not divisible by input spatial {H_in}*{W_in}={spatial_in}"
+        )
     if post_dim % spatial_out != 0:
         raise ValueError(
-            f"post_dim={post_dim} not divisible by output spatial "
-            f"{H_out}*{W_out}={spatial_out}")
+            f"post_dim={post_dim} not divisible by output spatial {H_out}*{W_out}={spatial_out}"
+        )
 
     return {
-        'in_channels': pre_dim // spatial_in,
-        'out_channels': post_dim // spatial_out,
-        'kernel_size': kernel_size,
-        'stride': stride,
-        'padding': padding,
-        'input_shape': input_shape,
-        'output_shape': output_shape,
+        "in_channels": pre_dim // spatial_in,
+        "out_channels": post_dim // spatial_out,
+        "kernel_size": kernel_size,
+        "stride": stride,
+        "padding": padding,
+        "input_shape": input_shape,
+        "output_shape": output_shape,
     }
 
 
@@ -161,15 +166,23 @@ def _attach_kernel_mask(obj, weight_mask):
     mask = np.asarray(weight_mask, dtype=np.float32)
     if mask.shape != expected:
         raise ValueError(
-            f"weight_mask shape {mask.shape} does not match expected "
-            f"kernel shape {expected}.")
+            f"weight_mask shape {mask.shape} does not match expected kernel shape {expected}."
+        )
     obj.is_masked = True
     obj.weight_mask = mask
 
 
-def _setup_transform(obj, transformation, pre_dim, post_dim,
-                     kernel_size=None, input_shape=None,
-                     stride=None, padding=None, weight_mask=None):
+def _setup_transform(
+    obj,
+    transformation,
+    pre_dim,
+    post_dim,
+    kernel_size=None,
+    input_shape=None,
+    stride=None,
+    padding=None,
+    weight_mask=None,
+):
     """Parse a transformation string and set transform attributes on ``obj``.
 
     Sets: ``is_conv``, ``is_transconv``, ``n_bands``, ``is_masked``,
@@ -197,97 +210,110 @@ def _setup_transform(obj, transformation, pre_dim, post_dim,
     obj.is_masked = False
     obj.weight_mask = None
     obj.post_activation_type_id = 0  # Direct by default
-    obj.pool_type = 0                # 0 = none, 1 = max, 2 = avg
+    obj.pool_type = 0  # 0 = none, 1 = max, 2 = avg
     obj.pool_size = ()
     obj.pool_stride = ()
 
-    if transformation == 'linear':
+    if transformation == "linear":
         pass
-    elif transformation.startswith('linear-'):
-        name = transformation[len('linear-'):]
+    elif transformation.startswith("linear-"):
+        name = transformation[len("linear-") :]
         try:
             act = activation_from_name(name)
         except ValueError as e:
-            raise ValueError(
-                f"Invalid transformation '{transformation}': {e}") from None
+            raise ValueError(f"Invalid transformation '{transformation}': {e}") from None
         obj.post_activation_type_id = act.type_id
-    elif transformation == 'conv':
+    elif transformation == "conv":
         if kernel_size is None or input_shape is None:
             raise ValueError("'conv' transformation requires kernel_size and input_shape")
         obj.is_conv = True
         info = _parse_conv_params(
-            pre_dim, post_dim, kernel_size, input_shape,
+            pre_dim,
+            post_dim,
+            kernel_size,
+            input_shape,
             stride if stride is not None else 1,
             padding if padding is not None else 0,
-            is_transconv=False)
+            is_transconv=False,
+        )
         for k, v in info.items():
             setattr(obj, k, v)
         _attach_kernel_mask(obj, weight_mask)
-    elif transformation.startswith('conv-maxpool') or \
-            transformation.startswith('conv-avgpool'):
+    elif transformation.startswith("conv-maxpool") or transformation.startswith("conv-avgpool"):
         # 'conv-maxpool' / 'conv-avgpool' [+ integer window, default 2], e.g.
         # 'conv-maxpool' (2x2) or 'conv-maxpool3' (3x3); stride = window
         # (non-overlapping), matching torch's MaxPool2d(k, stride=k).
         if kernel_size is None or input_shape is None:
             raise ValueError(
-                f"'{transformation}' transformation requires kernel_size "
-                f"and input_shape")
+                f"'{transformation}' transformation requires kernel_size and input_shape"
+            )
         obj.is_conv = True
-        obj.pool_type = 1 if 'maxpool' in transformation else 2
-        suffix = transformation.split('pool', 1)[1]
+        obj.pool_type = 1 if "maxpool" in transformation else 2
+        suffix = transformation.split("pool", 1)[1]
         try:
             p = int(suffix) if suffix else 2
         except ValueError:
             raise ValueError(
                 f"Invalid pool window in '{transformation}'. Use e.g. "
-                f"'conv-maxpool' or 'conv-maxpool3'.") from None
+                f"'conv-maxpool' or 'conv-maxpool3'."
+            ) from None
         obj.pool_size = (p, p)
         obj.pool_stride = (p, p)
         info = _parse_conv_params(
-            pre_dim, post_dim, kernel_size, input_shape,
+            pre_dim,
+            post_dim,
+            kernel_size,
+            input_shape,
             stride if stride is not None else 1,
             padding if padding is not None else 0,
-            is_transconv=False, pool=(obj.pool_size, obj.pool_stride))
+            is_transconv=False,
+            pool=(obj.pool_size, obj.pool_stride),
+        )
         for k, v in info.items():
             setattr(obj, k, v)
         _attach_kernel_mask(obj, weight_mask)
-    elif transformation == 'transconv':
+    elif transformation == "transconv":
         if kernel_size is None or input_shape is None:
             raise ValueError("'transconv' transformation requires kernel_size and input_shape")
         obj.is_transconv = True
         info = _parse_conv_params(
-            pre_dim, post_dim, kernel_size, input_shape,
+            pre_dim,
+            post_dim,
+            kernel_size,
+            input_shape,
             stride if stride is not None else 2,
             padding if padding is not None else 0,
-            is_transconv=True)
+            is_transconv=True,
+        )
         for k, v in info.items():
             setattr(obj, k, v)
         _attach_kernel_mask(obj, weight_mask)
-    elif transformation.startswith('banded'):
+    elif transformation.startswith("banded"):
         try:
             obj.n_bands = int(transformation[6:])
-        except ValueError:
+        except ValueError as exc:
             raise ValueError(
                 f"Invalid banded transformation '{transformation}'. "
-                f"Use format 'banded{{N}}' e.g. 'banded5'.")
-    elif transformation == 'masked' or transformation.startswith('masked-'):
-        if transformation.startswith('masked-'):
-            name = transformation[len('masked-'):]
+                f"Use format 'banded{{N}}' e.g. 'banded5'."
+            ) from exc
+    elif transformation == "masked" or transformation.startswith("masked-"):
+        if transformation.startswith("masked-"):
+            name = transformation[len("masked-") :]
             try:
                 act = activation_from_name(name)
             except ValueError as e:
-                raise ValueError(
-                    f"Invalid transformation '{transformation}': {e}") from None
+                raise ValueError(f"Invalid transformation '{transformation}': {e}") from None
             obj.post_activation_type_id = act.type_id
         if weight_mask is None:
             raise ValueError(
                 f"'{transformation}' transformation requires a weight_mask "
-                f"argument of shape ({post_dim}, {pre_dim}).")
+                f"argument of shape ({post_dim}, {pre_dim})."
+            )
         mask = np.asarray(weight_mask, dtype=np.float32)
         if mask.shape != (post_dim, pre_dim):
             raise ValueError(
-                f"weight_mask shape {mask.shape} does not match expected "
-                f"({post_dim}, {pre_dim}).")
+                f"weight_mask shape {mask.shape} does not match expected ({post_dim}, {pre_dim})."
+            )
         obj.is_masked = True
         obj.weight_mask = mask
     else:
@@ -295,12 +321,14 @@ def _setup_transform(obj, transformation, pre_dim, post_dim,
             f"Unknown transformation '{transformation}'. "
             f"Choices: 'linear', 'linear-<activation>', 'conv', "
             f"'conv-maxpool[N]', 'conv-avgpool[N]', 'transconv', "
-            f"'banded{{N}}', 'masked', 'masked-<activation>'.")
+            f"'banded{{N}}', 'masked', 'masked-<activation>'."
+        )
 
 
 # ============================================================================
 # Resolve helpers for NodeRef
 # ============================================================================
+
 
 def _resolve_owner_idx(node_ref: NodeRef) -> int:
     """Get the index for a NodeRef based on its owner type."""
@@ -314,7 +342,7 @@ def _resolve_owner_dim(node_ref: NodeRef) -> int:
 
 def _resolve_owner_label(node_ref: NodeRef) -> str:
     """Get a label for a NodeRef based on its owner type."""
-    if node_ref.owner_type == 'layer':
+    if node_ref.owner_type == "layer":
         return node_ref.owner.label or f"layer_{node_ref.owner._idx}"
     else:
         return f"predict_{node_ref.owner._idx}"
@@ -336,10 +364,8 @@ def _normalize_pre_layers(pre):
             layers.append(p)
             slices.append(None)
         elif isinstance(p, NodeRef):
-            if p.node_type != 'value' or p.owner_type != 'layer':
-                raise ValueError(
-                    "Predict pre must be Layers or sliced layer values, "
-                    f"got {p!r}")
+            if p.node_type != "value" or p.owner_type != "layer":
+                raise ValueError(f"Predict pre must be Layers or sliced layer values, got {p!r}")
             layers.append(p.owner)
             slices.append(p.slice_bounds)  # None if unsliced
         else:
@@ -374,12 +400,13 @@ def _normalize_precision_input(precision_input):
     for r in refs:
         if not isinstance(r, NodeRef):
             raise TypeError(
-                "precision_input entries must be Layers or NodeRefs, "
-                f"got {type(r).__name__}")
+                f"precision_input entries must be Layers or NodeRefs, got {type(r).__name__}"
+            )
         if r.node_type_id not in (0, 1, 2):
             raise ValueError(
                 "precision_input sources must be value, error, or precision "
-                f"nodes; flow nodes are not allowed, got {r!r}")
+                f"nodes; flow nodes are not allowed, got {r!r}"
+            )
     return refs
 
 
@@ -398,7 +425,8 @@ def _normalize_init_precision_weights(value):
         raise ValueError(
             "init_precision_weights must be a scalar, a (precision_input_dim,) "
             "vector, or a (rows, precision_input_dim) matrix; got array with "
-            f"shape {arr.shape}")
+            f"shape {arr.shape}"
+        )
     return arr
 
 
@@ -411,11 +439,12 @@ def _precision_source_dim(ref: NodeRef) -> int:
     """
     if ref.slice_bounds is not None:
         return ref.slice_bounds[1] - ref.slice_bounds[0]
-    if ref.owner_type == 'layer':
+    if ref.owner_type == "layer":
         return ref.owner.dim
     conn = ref.owner
-    if ref.node_type == 'precision' and not (
-            conn.learn_precision_weights or conn.learn_precision_bias):
+    if ref.node_type == "precision" and not (
+        conn.learn_precision_weights or conn.learn_precision_bias
+    ):
         return 1
     return conn.post_dim
 
@@ -423,6 +452,7 @@ def _precision_source_dim(ref: NodeRef) -> int:
 # ============================================================================
 # Delay validation (shared by Predict / Project / Modulate)
 # ============================================================================
+
 
 def _validate_delay(delay, delay_unit):
     """Validate a connection ``delay`` / ``delay_unit`` pair.
@@ -432,9 +462,8 @@ def _validate_delay(delay, delay_unit):
     """
     if isinstance(delay, bool) or not isinstance(delay, (int, np.integer)) or int(delay) < 0:
         raise ValueError(f"delay must be a non-negative int, got {delay!r}")
-    if delay_unit not in ('iteration', 'timestep'):
-        raise ValueError(
-            f"delay_unit must be 'iteration' or 'timestep', got {delay_unit!r}")
+    if delay_unit not in ("iteration", "timestep"):
+        raise ValueError(f"delay_unit must be 'iteration' or 'timestep', got {delay_unit!r}")
     return int(delay)
 
 
@@ -442,9 +471,9 @@ def _validate_delay(delay, delay_unit):
 # Predict
 # ============================================================================
 
+
 class Predict:
-    """
-    Standard predictive coding connection.
+    """Standard predictive coding connection.
 
     The pre layer(s) predict the post layer:
         prediction = W @ f(pre.value)
@@ -579,17 +608,18 @@ class Predict:
         This gives precision parameters a lower learning rate while predict
         weights use the default. See :meth:`PCNetwork.multi_transform` for
         the full matching priority (connection labels, param types, etc.).
+
     """
 
     def __init__(
         self,
-        pre: Union[Layer, List[Layer]],
+        pre: Layer | list[Layer],
         post: Layer,
-        label: Optional[str] = None,
-        order: Optional[int] = None,
-        init_weight: Optional[np.ndarray] = None,
-        learn_weights: Optional[bool] = None,
-        init_bias: Optional[np.ndarray] = None,
+        label: str | None = None,
+        order: int | None = None,
+        init_weight: np.ndarray | None = None,
+        learn_weights: bool | None = None,
+        init_bias: np.ndarray | None = None,
         use_bias=_DEFAULT,
         init_precision=_DEFAULT,
         init_log_precision=_DEFAULT,
@@ -606,7 +636,7 @@ class Predict:
         error_activation=_DEFAULT,
         alpha=_DEFAULT,
         n_bands: int = 0,
-        transformation: str = 'linear',
+        transformation: str = "linear",
         kernel_size=None,
         input_shape=None,
         stride=None,
@@ -614,9 +644,10 @@ class Predict:
         weight_mask=None,
         stochastic: bool = True,
         delay: int = 0,
-        delay_unit: str = 'iteration',
+        delay_unit: str = "iteration",
     ):
         from .network import _get_current_network
+
         net = _get_current_network()
         defaults = net._defaults
 
@@ -630,9 +661,10 @@ class Predict:
 
         # Normalize post (may be a sliced NodeRef from layer[:5])
         if isinstance(post, NodeRef):
-            if post.node_type != 'value' or post.owner_type != 'layer':
+            if post.node_type != "value" or post.owner_type != "layer":
                 raise ValueError(
-                    f"Predict post must be a Layer or sliced layer value, got {post!r}")
+                    f"Predict post must be a Layer or sliced layer value, got {post!r}"
+                )
             self.post = post.owner
             self.post_slice = post.slice_bounds
         else:
@@ -645,8 +677,8 @@ class Predict:
         self.learn_weights = learn_weights
         self.bias = init_bias
         self.n_bands = n_bands
-        self.stochastic = stochastic   # per-conn is_stochastic noise gate
-        self.use_bias = use_bias if use_bias is not _DEFAULT else defaults['use_bias']
+        self.stochastic = stochastic  # per-conn is_stochastic noise gate
+        self.use_bias = use_bias if use_bias is not _DEFAULT else defaults["use_bias"]
 
         # Resolve init_precision. ``init_log_precision`` is accepted for
         # backwards compatibility: if provided, it is converted via exp.
@@ -655,11 +687,11 @@ class Predict:
             self.init_precision = float(init_precision)
         elif init_log_precision is not _DEFAULT:
             self.init_precision = float(np.exp(init_log_precision))
-        elif 'init_precision' in defaults:
-            self.init_precision = float(defaults['init_precision'])
+        elif "init_precision" in defaults:
+            self.init_precision = float(defaults["init_precision"])
         else:
             # Fallback: legacy config files may still specify init_log_precision
-            self.init_precision = float(np.exp(defaults['init_log_precision']))
+            self.init_precision = float(np.exp(defaults["init_log_precision"]))
 
         # Resolve learn_precision_weights and learn_precision_bias.
         # learn_precision is a shorthand: if set and neither individual flag is
@@ -669,17 +701,19 @@ class Predict:
         elif learn_precision is not _DEFAULT:
             self.learn_precision_weights = learn_precision
         else:
-            self.learn_precision_weights = defaults.get('learn_precision_weights',
-                                                        defaults.get('learn_precision', True))
+            self.learn_precision_weights = defaults.get(
+                "learn_precision_weights", defaults.get("learn_precision", True)
+            )
 
         if learn_precision_bias is not _DEFAULT:
             self.learn_precision_bias = learn_precision_bias
         elif learn_precision is not _DEFAULT:
             self.learn_precision_bias = learn_precision
         else:
-            self.learn_precision_bias = defaults.get('learn_precision_bias',
-                                                     defaults.get('learn_precision', True))
-        self.alpha = alpha if alpha is not _DEFAULT else defaults['alpha']
+            self.learn_precision_bias = defaults.get(
+                "learn_precision_bias", defaults.get("learn_precision", True)
+            )
+        self.alpha = alpha if alpha is not _DEFAULT else defaults["alpha"]
 
         # When True, precision = softplus(W_ρ @ standardize(pre) + b): the
         # pre-activation is per-sample standardised (stop_gradient) inside the
@@ -696,7 +730,8 @@ class Predict:
         if self.precision_clip_max and self.precision_clip_max <= self.precision_clip_min:
             raise ValueError(
                 f"precision_clip_max ({self.precision_clip_max}) must exceed "
-                f"precision_clip_min ({self.precision_clip_min}) when > 0")
+                f"precision_clip_min ({self.precision_clip_min}) when > 0"
+            )
 
         # Precision activation: new ``precision_activation`` kwarg supersedes
         # the legacy ``precision_parameterization``. If neither is provided,
@@ -706,25 +741,28 @@ class Predict:
         elif precision_parameterization is not _DEFAULT:
             pp = precision_parameterization
         else:
-            pp = defaults.get('precision_activation',
-                              defaults.get('precision_parameterization', 'softplus'))
+            pp = defaults.get(
+                "precision_activation", defaults.get("precision_parameterization", "softplus")
+            )
         try:
             self.precision_activation = _resolve_activation(pp, default_instance=None)
         except ValueError as e:
-            raise ValueError(
-                f"Unknown precision_activation '{pp}': {e}") from None
+            raise ValueError(f"Unknown precision_activation '{pp}': {e}") from None
         if self.precision_activation is None:
             raise ValueError("precision_activation must not be None")
         self.precision_activation_type = self.precision_activation.type_id
 
         # Error activation: defaults to Direct (identity) -- preserves the
         # standard PC residual semantics when not configured.
-        ea = error_activation if error_activation is not _DEFAULT else defaults.get('error_activation', None)
+        ea = (
+            error_activation
+            if error_activation is not _DEFAULT
+            else defaults.get("error_activation", None)
+        )
         try:
             self.error_activation = _resolve_activation(ea, default_instance=Direct())
         except ValueError as e:
-            raise ValueError(
-                f"Unknown error_activation '{ea}': {e}") from None
+            raise ValueError(f"Unknown error_activation '{ea}': {e}") from None
         self.error_activation_type = self.error_activation.type_id
 
         # Custom precision sources. Stored raw and re-normalized at build time
@@ -736,30 +774,38 @@ class Predict:
 
         # Optional hand-set W_rho. Shape is validated at build, once
         # precision_input (and hence precision_input_dim) is final.
-        self.init_precision_weights = _normalize_init_precision_weights(
-            init_precision_weights)
+        self.init_precision_weights = _normalize_init_precision_weights(init_precision_weights)
 
         # Compute combined pre dim (respects slicing)
         self.pre_dim = sum(
             (s[1] - s[0]) if s is not None else p.dim
-            for p, s in zip(self.pre, self.pre_slices)
+            for p, s in zip(self.pre, self.pre_slices, strict=False)
         )
         # Post dim (respects slicing)
-        self.post_dim = (self.post_slice[1] - self.post_slice[0]) if self.post_slice else self.post.dim
+        self.post_dim = (
+            (self.post_slice[1] - self.post_slice[0]) if self.post_slice else self.post.dim
+        )
 
         # Set up transformation (sets is_conv, is_transconv, n_bands, conv params)
-        self.is_res = getattr(self, 'is_res', False)
-        _setup_transform(self, transformation, self.pre_dim, self.post_dim,
-                         kernel_size, input_shape, stride, padding,
-                         weight_mask=weight_mask)
+        self.is_res = getattr(self, "is_res", False)
+        _setup_transform(
+            self,
+            transformation,
+            self.pre_dim,
+            self.post_dim,
+            kernel_size,
+            input_shape,
+            stride,
+            padding,
+            weight_mask=weight_mask,
+        )
 
         # Validate: slicing incompatible with conv/transconv
         has_slicing = any(s is not None for s in self.pre_slices) or self.post_slice is not None
         if has_slicing and (self.is_conv or self.is_transconv):
-            raise ValueError(
-                "Slicing is not compatible with conv/transconv transforms")
+            raise ValueError("Slicing is not compatible with conv/transconv transforms")
 
-        self._idx: Optional[int] = None
+        self._idx: int | None = None
         self._default_order: int = 0
 
         # Register with current network context
@@ -810,8 +856,7 @@ class Predict:
             return None
         pin_dim = self.precision_input_dim
         refs = self._resolved_precision_input()
-        src = ("its pre" if refs is None
-               else "precision_input " + ", ".join(repr(r) for r in refs))
+        src = "its pre" if refs is None else "precision_input " + ", ".join(repr(r) for r in refs)
         name = self.label or f"Predict({self.pre_dim}->{self.post_dim})"
 
         if arr.ndim == 0:
@@ -821,7 +866,8 @@ class Predict:
                 raise ValueError(
                     f"{name}: init_precision_weights has shape {arr.shape}, but "
                     f"the precision function reads {src} with dim {pin_dim}; a "
-                    f"1-D init must have shape ({pin_dim},)")
+                    f"1-D init must have shape ({pin_dim},)"
+                )
             return np.broadcast_to(arr[None, :], (rows, pin_dim)).astype(np.float32)
         if arr.shape[1] != pin_dim or arr.shape[0] not in (1, rows):
             raise ValueError(
@@ -830,7 +876,8 @@ class Predict:
                 f"reads {src} (dim {pin_dim}) and carries {rows} output row(s) "
                 f"(post_dim={self.post_dim}, learn_precision_weights="
                 f"{self.learn_precision_weights}, learn_precision_bias="
-                f"{self.learn_precision_bias})")
+                f"{self.learn_precision_bias})"
+            )
         return np.broadcast_to(arr, (rows, pin_dim)).astype(np.float32)
 
     @property
@@ -841,35 +888,34 @@ class Predict:
     @property
     def error(self) -> NodeRef:
         """Reference to this connection's error node."""
-        return NodeRef(self, 'error', owner_type='predict')
+        return NodeRef(self, "error", owner_type="predict")
 
     @property
     def precision(self) -> NodeRef:
         """Reference to this connection's precision node."""
-        return NodeRef(self, 'precision', owner_type='predict')
+        return NodeRef(self, "precision", owner_type="predict")
 
     @property
     def flow_to_pre(self) -> NodeRef:
         """Gate for ascending error pathway (error -> pre value gradient)."""
-        return NodeRef(self, 'flow_to_pre', owner_type='predict')
+        return NodeRef(self, "flow_to_pre", owner_type="predict")
 
     @property
     def flow_to_post(self) -> NodeRef:
         """Gate for descending error pathway (error -> post value gradient)."""
-        return NodeRef(self, 'flow_to_post', owner_type='predict')
+        return NodeRef(self, "flow_to_post", owner_type="predict")
 
     def __repr__(self):
         if len(self.pre) == 1:
             pre_label = self.pre[0].label or f"layer_{self.pre[0]._idx}"
         else:
-            pre_label = '+'.join(p.label or f"layer_{p._idx}" for p in self.pre)
+            pre_label = "+".join(p.label or f"layer_{p._idx}" for p in self.pre)
         post_label = self.post.label or f"layer_{self.post._idx}"
         return f"Predict({pre_label} -> {post_label})"
 
 
 class PredictRes(Predict):
-    """
-    Residual predictive coding connection.
+    """Residual predictive coding connection.
 
     Like Predict, but adds a residual connection: prediction = W @ f(pre.value) + pre.value
 
@@ -891,22 +937,26 @@ class PredictRes(Predict):
 
 
 class PredictConv(Predict):
-    """
-    Convolutional predictive coding connection.
+    """Convolutional predictive coding connection.
 
     Convenience wrapper for ``Predict(..., transformation='conv', ...)``.
     """
 
-    def __init__(self, pre, post, kernel_size, input_shape,
-                 stride=1, padding=0, **kwargs):
-        super().__init__(pre, post, transformation='conv',
-                         kernel_size=kernel_size, input_shape=input_shape,
-                         stride=stride, padding=padding, **kwargs)
+    def __init__(self, pre, post, kernel_size, input_shape, stride=1, padding=0, **kwargs):
+        super().__init__(
+            pre,
+            post,
+            transformation="conv",
+            kernel_size=kernel_size,
+            input_shape=input_shape,
+            stride=stride,
+            padding=padding,
+            **kwargs,
+        )
 
 
 class PredictConvPool(Predict):
-    """
-    Convolutional predictive coding connection with a fused spatial pool.
+    """Convolutional predictive coding connection with a fused spatial pool.
 
     Convenience wrapper for
     ``Predict(..., transformation='conv-maxpool'/'conv-avgpool', ...)``.
@@ -919,47 +969,70 @@ class PredictConvPool(Predict):
     Args:
         pool: ``'max'`` (default) or ``'avg'``.
         pool_size: pooling window / stride (non-overlapping), default 2.
+
     """
 
-    def __init__(self, pre, post, kernel_size, input_shape,
-                 pool='max', pool_size=2, stride=1, padding=0, **kwargs):
-        if pool not in ('max', 'avg'):
+    def __init__(
+        self,
+        pre,
+        post,
+        kernel_size,
+        input_shape,
+        pool="max",
+        pool_size=2,
+        stride=1,
+        padding=0,
+        **kwargs,
+    ):
+        if pool not in ("max", "avg"):
             raise ValueError(f"pool must be 'max' or 'avg', got {pool!r}")
-        kind = 'maxpool' if pool == 'max' else 'avgpool'
-        suffix = '' if pool_size == 2 else str(pool_size)
-        super().__init__(pre, post, transformation=f'conv-{kind}{suffix}',
-                         kernel_size=kernel_size, input_shape=input_shape,
-                         stride=stride, padding=padding, **kwargs)
+        kind = "maxpool" if pool == "max" else "avgpool"
+        suffix = "" if pool_size == 2 else str(pool_size)
+        super().__init__(
+            pre,
+            post,
+            transformation=f"conv-{kind}{suffix}",
+            kernel_size=kernel_size,
+            input_shape=input_shape,
+            stride=stride,
+            padding=padding,
+            **kwargs,
+        )
 
 
 class PredictTransConv(Predict):
-    """
-    Transposed convolutional predictive coding connection.
+    """Transposed convolutional predictive coding connection.
 
     Convenience wrapper for ``Predict(..., transformation='transconv', ...)``.
     """
 
-    def __init__(self, pre, post, kernel_size, input_shape,
-                 stride=2, padding=0, **kwargs):
-        super().__init__(pre, post, transformation='transconv',
-                         kernel_size=kernel_size, input_shape=input_shape,
-                         stride=stride, padding=padding, **kwargs)
+    def __init__(self, pre, post, kernel_size, input_shape, stride=2, padding=0, **kwargs):
+        super().__init__(
+            pre,
+            post,
+            transformation="transconv",
+            kernel_size=kernel_size,
+            input_shape=input_shape,
+            stride=stride,
+            padding=padding,
+            **kwargs,
+        )
 
 
 # ============================================================================
 # Project
 # ============================================================================
 
+
 class Project:
-    """
-    Additive non-PC connection.
+    """Additive non-PC connection.
 
     Adds a weighted projection to a target node:
         target += W @ f(source)
 
     Args:
         pre: Source node(s). A NodeRef, Layer (treated as layer.value),
-            or indexed node (e.g. value[i:j]) or a list of nodes. 
+            or indexed node (e.g. value[i:j]) or a list of nodes.
             For multi-pre, values are concatenated.
             All pre nodes must share the same node type (value or error).
         post: Target node. A NodeRef or Layer (treated as layer.value).
@@ -968,7 +1041,7 @@ class Project:
             'banded{N}', 'masked'). ``'masked'`` requires ``weight_mask``.
         update_rule: Learning rule for weight updates (default: Hebbian).
         order: Execution order (lower = earlier). Matters if using a mix of Project and Modulate conns.
-        init_weight: Optional initial weight matrix. 
+        init_weight: Optional initial weight matrix.
         init_scale: Scalar multiplier on the default weight init (Gaussian with
             stddev ``sqrt(2 / (fan_in + fan_out))``), i.e. the built weights are
             ``init_scale * sqrt(2/(fan_in+fan_out)) * N(0, 1)``. Ignored when
@@ -1020,44 +1093,46 @@ class Project:
         Project([l1, l2], l3.value)  # multi-pre, Layer input
         Project(l.value, l.value, init_weight=-np.eye(d), advance='timestep')
         Project(a.value, b.value, delay=2, init_weight=np.eye(d))  # delayed copy
+
     """
 
     def __init__(
         self,
-        pre: Union[NodeRef, Layer, List[Union[NodeRef, Layer]]],
-        post: Union[NodeRef, Layer],
-        update_rule: Optional[LearningRule] = None,
-        order: Optional[int] = None,
-        init_weight: Optional[np.ndarray] = None,
+        pre: NodeRef | Layer | list[NodeRef | Layer],
+        post: NodeRef | Layer,
+        update_rule: LearningRule | None = None,
+        order: int | None = None,
+        init_weight: np.ndarray | None = None,
         init_scale: float = 1.0,
-        init_bias: Optional[np.ndarray] = None,
+        init_bias: np.ndarray | None = None,
         use_bias=_DEFAULT,
-        label: Optional[str] = None,
-        transformation: str = 'linear',
+        label: str | None = None,
+        transformation: str = "linear",
         kernel_size=None,
         input_shape=None,
         stride=None,
         padding=None,
         weight_mask=None,
-        advance: str = 'iteration',
+        advance: str = "iteration",
         delay: int = 0,
-        delay_unit: str = 'iteration',
+        delay_unit: str = "iteration",
     ):
-        if advance not in ('iteration', 'timestep'):
+        if advance not in ("iteration", "timestep"):
             raise ValueError(
-                "Project(advance=...) must be 'iteration' or 'timestep', "
-                f"got {advance!r}")
+                f"Project(advance=...) must be 'iteration' or 'timestep', got {advance!r}"
+            )
         self.advance = advance
         self.init_scale = float(init_scale)
         self.delay = _validate_delay(delay, delay_unit)
         self.delay_unit = delay_unit
 
         from .network import _get_current_network
+
         net = _get_current_network()
         defaults = net._defaults
 
         self.label = label
-        self.use_bias = use_bias if use_bias is not _DEFAULT else defaults['use_bias']
+        self.use_bias = use_bias if use_bias is not _DEFAULT else defaults["use_bias"]
 
         # Normalize pre to list of NodeRefs (Layer -> layer.value)
         self._pre_list = _normalize_pre_noderefs(pre)
@@ -1071,18 +1146,20 @@ class Project:
         self.post_slice = self.post.slice_bounds
 
         # Validate: all pre must have the same node type
-        node_types = set(p.node_type_id for p in self._pre_list)
+        node_types = {p.node_type_id for p in self._pre_list}
         if len(node_types) > 1:
             raise ValueError(
                 "All pre nodes in a Project connection must have the same "
-                f"node type, got: {[p.node_type for p in self._pre_list]}")
+                f"node type, got: {[p.node_type for p in self._pre_list]}"
+            )
 
         # Validate: flow nodes cannot be pre source
         pre_type = self._pre_list[0].node_type_id
         if pre_type in (3, 4):
             raise ValueError(
                 "Flow nodes (flow_to_pre, flow_to_post) cannot be used as "
-                "pre source for Project connections")
+                "pre source for Project connections"
+            )
 
         # Phase 1 restriction: delay is only implemented for value pre nodes.
         if self.delay >= 1 and any(p.node_type_id != 0 for p in self._pre_list):
@@ -1093,28 +1170,30 @@ class Project:
         if post_type in (3, 4):
             raise ValueError(
                 "Flow nodes (flow_to_pre, flow_to_post) can only be targeted "
-                "by Modulate connections, not Project")
+                "by Modulate connections, not Project"
+            )
 
         # Validate: advance='timestep' is only meaningful for value targets.
-        if advance == 'timestep' and post_type != 0:
+        if advance == "timestep" and post_type != 0:
             raise ValueError(
                 "Project(advance='timestep') is only supported for "
                 "value-targeting connections (post is a layer value), got post "
                 f"node type {self.post.node_type!r}. Error- and "
                 "precision-targeting routing is re-derived fresh every "
                 "iteration and does not carry, so gating it to timestep "
-                "boundaries has no effect.")
+                "boundaries has no effect."
+            )
 
         if update_rule is not None:
             self.update_rule = update_rule
         else:
-            lr = defaults['hebbian_learning_rate']
+            lr = defaults["hebbian_learning_rate"]
             self.update_rule = Hebbian(learning_rate=lr)
         self.order = order
         self.weight = init_weight
         self.bias = init_bias
 
-        self._idx: Optional[int] = None
+        self._idx: int | None = None
         self._default_order: int = 0
         self.reward_fn_idx: int = -1
         self.loss_fn_idx: int = -1
@@ -1122,7 +1201,7 @@ class Project:
         # Derived properties for backend
         self.pre_layer_idxs: tuple = tuple(_resolve_owner_idx(p) for p in self._pre_list)
         self.pre_node_type: int = self._pre_list[0].node_type_id
-        self.post_layer_idx: Optional[int] = _resolve_owner_idx(self.post)
+        self.post_layer_idx: int | None = _resolve_owner_idx(self.post)
         self.post_node_type: int = self.post.node_type_id
 
         # Store dimensions for weight initialization (respects slicing)
@@ -1131,15 +1210,22 @@ class Project:
 
         # Set up transformation
         self.n_bands = 0
-        _setup_transform(self, transformation, self.pre_dim, self.post_dim,
-                         kernel_size, input_shape, stride, padding,
-                         weight_mask=weight_mask)
+        _setup_transform(
+            self,
+            transformation,
+            self.pre_dim,
+            self.post_dim,
+            kernel_size,
+            input_shape,
+            stride,
+            padding,
+            weight_mask=weight_mask,
+        )
 
         # Validate: slicing incompatible with conv/transconv
         has_slicing = any(s is not None for s in self.pre_slices) or self.post_slice is not None
         if has_slicing and (self.is_conv or self.is_transconv):
-            raise ValueError(
-                "Slicing is not compatible with conv/transconv transforms")
+            raise ValueError("Slicing is not compatible with conv/transconv transforms")
 
         # Register with current network context
         net._add_project(self)
@@ -1148,7 +1234,7 @@ class Project:
         if len(self._pre_list) == 1:
             pre_label = _resolve_owner_label(self._pre_list[0])
         else:
-            pre_label = '+'.join(_resolve_owner_label(p) for p in self._pre_list)
+            pre_label = "+".join(_resolve_owner_label(p) for p in self._pre_list)
         post_label = _resolve_owner_label(self.post)
         return f"Project({pre_label}.{self._pre_list[0].node_type} -> {post_label}.{self.post.node_type})"
 
@@ -1157,9 +1243,9 @@ class Project:
 # Modulate
 # ============================================================================
 
+
 class Modulate:
-    """
-    Multiplicative non-PC connection (neuromodulation).
+    """Multiplicative non-PC connection (neuromodulation).
 
     Multiplies a target node by a weighted projection:
         target *= W @ f(source)
@@ -1214,42 +1300,44 @@ class Modulate:
     Example:
         Modulate(l3.value, p2.error, update_rule=ThreeFactorHebbian(...))
         Modulate(l3, p2.error)  # Layer input, same as l3.value
+
     """
 
     def __init__(
         self,
-        pre: Union[NodeRef, Layer, List[Union[NodeRef, Layer]]],
-        post: Union[NodeRef, Layer],
-        update_rule: Optional[LearningRule] = None,
-        order: Optional[int] = None,
-        init_weight: Optional[np.ndarray] = None,
-        init_bias: Optional[np.ndarray] = None,
-        label: Optional[str] = None,
-        transformation: str = 'linear',
+        pre: NodeRef | Layer | list[NodeRef | Layer],
+        post: NodeRef | Layer,
+        update_rule: LearningRule | None = None,
+        order: int | None = None,
+        init_weight: np.ndarray | None = None,
+        init_bias: np.ndarray | None = None,
+        label: str | None = None,
+        transformation: str = "linear",
         kernel_size=None,
         input_shape=None,
         stride=None,
         padding=None,
         weight_mask=None,
         use_bias=_DEFAULT,
-        advance: str = 'iteration',
+        advance: str = "iteration",
         delay: int = 0,
-        delay_unit: str = 'iteration',
+        delay_unit: str = "iteration",
     ):
-        if advance not in ('iteration', 'timestep'):
+        if advance not in ("iteration", "timestep"):
             raise ValueError(
-                "Modulate(advance=...) must be 'iteration' or 'timestep', "
-                f"got {advance!r}")
+                f"Modulate(advance=...) must be 'iteration' or 'timestep', got {advance!r}"
+            )
         self.advance = advance
         self.delay = _validate_delay(delay, delay_unit)
         self.delay_unit = delay_unit
 
         from .network import _get_current_network
+
         net = _get_current_network()
         defaults = net._defaults
 
         self.label = label
-        self.use_bias = use_bias if use_bias is not _DEFAULT else defaults['use_bias']
+        self.use_bias = use_bias if use_bias is not _DEFAULT else defaults["use_bias"]
 
         # Normalize pre to list of NodeRefs (Layer -> layer.value)
         self._pre_list = _normalize_pre_noderefs(pre)
@@ -1263,43 +1351,46 @@ class Modulate:
         self.post_slice = self.post.slice_bounds
 
         # Validate: all pre must have the same node type
-        node_types = set(p.node_type_id for p in self._pre_list)
+        node_types = {p.node_type_id for p in self._pre_list}
         if len(node_types) > 1:
             raise ValueError(
                 "All pre nodes in a Modulate connection must have the same "
-                f"node type, got: {[p.node_type for p in self._pre_list]}")
+                f"node type, got: {[p.node_type for p in self._pre_list]}"
+            )
 
         # Validate: flow nodes cannot be pre source
         pre_type = self._pre_list[0].node_type_id
         if pre_type in (3, 4):
             raise ValueError(
                 "Flow nodes (flow_to_pre, flow_to_post) cannot be used as "
-                "pre source for Modulate connections")
+                "pre source for Modulate connections"
+            )
 
         # Phase 1 restriction: delay is only implemented for value pre nodes.
         if self.delay >= 1 and any(p.node_type_id != 0 for p in self._pre_list):
             raise NotImplementedError("delay on error/precision pres is Phase 2")
 
         # Validate: advance='timestep' is only meaningful for value targets.
-        if advance == 'timestep' and self.post.node_type_id != 0:
+        if advance == "timestep" and self.post.node_type_id != 0:
             raise ValueError(
                 "Modulate(advance='timestep') is only supported for "
                 "value-targeting connections (post is a layer value), got post "
                 f"node type {self.post.node_type!r}. Error-, precision- and "
                 "flow-targeting routing is re-derived fresh every iteration "
                 "and does not carry, so gating it to timestep boundaries has "
-                "no effect.")
+                "no effect."
+            )
 
         if update_rule is not None:
             self.update_rule = update_rule
         else:
-            lr = defaults['hebbian_learning_rate']
+            lr = defaults["hebbian_learning_rate"]
             self.update_rule = Hebbian(learning_rate=lr)
         self.order = order
         self.weight = init_weight
         self.bias = init_bias
 
-        self._idx: Optional[int] = None
+        self._idx: int | None = None
         self._default_order: int = 0
         self.reward_fn_idx: int = -1
         self.loss_fn_idx: int = -1
@@ -1307,7 +1398,7 @@ class Modulate:
         # Derived properties for backend
         self.pre_layer_idxs: tuple = tuple(_resolve_owner_idx(p) for p in self._pre_list)
         self.pre_node_type: int = self._pre_list[0].node_type_id
-        self.post_layer_idx: Optional[int] = _resolve_owner_idx(self.post)
+        self.post_layer_idx: int | None = _resolve_owner_idx(self.post)
         self.post_node_type: int = self.post.node_type_id
 
         # Store dimensions for weight initialization (respects slicing)
@@ -1316,15 +1407,22 @@ class Modulate:
 
         # Set up transformation
         self.n_bands = 0
-        _setup_transform(self, transformation, self.pre_dim, self.post_dim,
-                         kernel_size, input_shape, stride, padding,
-                         weight_mask=weight_mask)
+        _setup_transform(
+            self,
+            transformation,
+            self.pre_dim,
+            self.post_dim,
+            kernel_size,
+            input_shape,
+            stride,
+            padding,
+            weight_mask=weight_mask,
+        )
 
         # Validate: slicing incompatible with conv/transconv
         has_slicing = any(s is not None for s in self.pre_slices) or self.post_slice is not None
         if has_slicing and (self.is_conv or self.is_transconv):
-            raise ValueError(
-                "Slicing is not compatible with conv/transconv transforms")
+            raise ValueError("Slicing is not compatible with conv/transconv transforms")
 
         # Register with current network context
         net._add_modulate(self)
@@ -1333,6 +1431,6 @@ class Modulate:
         if len(self._pre_list) == 1:
             pre_label = _resolve_owner_label(self._pre_list[0])
         else:
-            pre_label = '+'.join(_resolve_owner_label(p) for p in self._pre_list)
+            pre_label = "+".join(_resolve_owner_label(p) for p in self._pre_list)
         post_label = _resolve_owner_label(self.post)
         return f"Modulate({pre_label}.{self._pre_list[0].node_type} -> {post_label}.{self.post.node_type})"

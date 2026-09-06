@@ -32,159 +32,158 @@ Matrix (task-mandated):
 
 import sys
 
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 
 import pcn
-from pcn.core.activations import Softplus, Direct
-
+from pcn.core.activations import Softplus
 
 # ---------------------------------------------------------------------------
 # Net builders. Each returns (net, input_label, input_is_temporal).
 # The input layer is clamped for both test and train (uniform, deterministic).
 # ---------------------------------------------------------------------------
 
+
 def _n1_plain():
     net = pcn.PCNetwork(seed=0)
     with net:
-        a = pcn.Layer(dim=5, label='a')
-        b = pcn.Layer(dim=4, activation=pcn.Relu(), label='b')
-        c = pcn.Layer(dim=3, label='c')
+        a = pcn.Layer(dim=5, label="a")
+        b = pcn.Layer(dim=4, activation=pcn.Relu(), label="b")
+        c = pcn.Layer(dim=3, label="c")
         pcn.Predict(a, b)
         pcn.Predict(b, c)
     net.build()
-    return net, 'a', False
+    return net, "a", False
 
 
 def _n2_leaky_error():
     net = pcn.PCNetwork(seed=0)
     with net:
-        a = pcn.Layer(dim=5, label='a')
-        b = pcn.Layer(dim=4, activation=pcn.Relu(), label='b')
-        c = pcn.Layer(dim=3, label='c')
+        a = pcn.Layer(dim=5, label="a")
+        b = pcn.Layer(dim=4, activation=pcn.Relu(), label="b")
+        c = pcn.Layer(dim=3, label="c")
         pcn.Predict(a, b, error_activation=pcn.Leaky(leak=0.3))
         pcn.Predict(b, c)
     net.build()
-    return net, 'a', False
+    return net, "a", False
 
 
 def _n3_leaky_precision():
     net = pcn.PCNetwork(seed=0)
     with net:
-        a = pcn.Layer(dim=5, label='a')
-        b = pcn.Layer(dim=4, activation=pcn.Relu(), label='b')
-        c = pcn.Layer(dim=3, label='c')
-        pcn.Predict(a, b,
-                    precision_activation=pcn.Leaky(base=Softplus(), leak=0.3))
+        a = pcn.Layer(dim=5, label="a")
+        b = pcn.Layer(dim=4, activation=pcn.Relu(), label="b")
+        c = pcn.Layer(dim=3, label="c")
+        pcn.Predict(a, b, precision_activation=pcn.Leaky(base=Softplus(), leak=0.3))
         pcn.Predict(b, c)
     net.build()
-    return net, 'a', False
+    return net, "a", False
 
 
 def _n4_error_routing():
     net = pcn.PCNetwork(seed=0)
     with net:
-        a = pcn.Layer(dim=5, label='a')
-        b = pcn.Layer(dim=4, activation=pcn.Relu(), label='b')
-        c = pcn.Layer(dim=4, label='c')
+        a = pcn.Layer(dim=5, label="a")
+        b = pcn.Layer(dim=4, activation=pcn.Relu(), label="b")
+        c = pcn.Layer(dim=4, label="c")
         p1 = pcn.Predict(a, b)
         pcn.Predict(b, c)
-        pcn.Project(a.value, p1.error)   # error-TARGET (post is error node)
-        pcn.Project(p1.error, c.value)   # error-PRE (pre is error node)
+        pcn.Project(a.value, p1.error)  # error-TARGET (post is error node)
+        pcn.Project(p1.error, c.value)  # error-PRE (pre is error node)
     net.build()
-    return net, 'a', False
+    return net, "a", False
 
 
 def _n5_precision_routing():
     net = pcn.PCNetwork(seed=0)
     with net:
-        a = pcn.Layer(dim=5, label='a')
-        b = pcn.Layer(dim=4, activation=pcn.Relu(), label='b')
-        c = pcn.Layer(dim=3, label='c')
+        a = pcn.Layer(dim=5, label="a")
+        b = pcn.Layer(dim=4, activation=pcn.Relu(), label="b")
+        c = pcn.Layer(dim=3, label="c")
         p1 = pcn.Predict(a, b)
         pcn.Predict(b, c)
-        pcn.Project(a.value, p1.precision)   # precision-TARGET
+        pcn.Project(a.value, p1.precision)  # precision-TARGET
     net.build()
-    return net, 'a', False
+    return net, "a", False
 
 
 def _n6_pin_value():
     net = pcn.PCNetwork(seed=0)
     with net:
-        a = pcn.Layer(dim=5, activation=pcn.Direct(), label='a')
-        b = pcn.Layer(dim=4, activation=pcn.Relu(), label='b')
-        c = pcn.Layer(dim=3, label='c')
-        ctx = pcn.Layer(dim=6, label='ctx')
-        pcn.Predict(a, b, precision_input=ctx)   # value source (node_type 0)
+        a = pcn.Layer(dim=5, activation=pcn.Direct(), label="a")
+        b = pcn.Layer(dim=4, activation=pcn.Relu(), label="b")
+        c = pcn.Layer(dim=3, label="c")
+        ctx = pcn.Layer(dim=6, label="ctx")
+        pcn.Predict(a, b, precision_input=ctx)  # value source (node_type 0)
         pcn.Predict(b, c)
     net.build()
-    return net, 'a', False
+    return net, "a", False
 
 
 def _n7_pin_error():
     net = pcn.PCNetwork(seed=0)
     with net:
-        a = pcn.Layer(dim=5, label='a')
-        b = pcn.Layer(dim=4, activation=pcn.Relu(), label='b')
-        c = pcn.Layer(dim=3, label='c')
+        a = pcn.Layer(dim=5, label="a")
+        b = pcn.Layer(dim=4, activation=pcn.Relu(), label="b")
+        c = pcn.Layer(dim=3, label="c")
         p1 = pcn.Predict(a, b)
-        pcn.Predict(b, c, precision_input=[p1.error])   # error source (nt 1)
+        pcn.Predict(b, c, precision_input=[p1.error])  # error source (nt 1)
     net.build()
-    return net, 'a', False
+    return net, "a", False
 
 
 def _n8_pin_precision():
     net = pcn.PCNetwork(seed=0)
     with net:
-        a = pcn.Layer(dim=5, label='a')
-        b = pcn.Layer(dim=4, activation=pcn.Relu(), label='b')
-        c = pcn.Layer(dim=3, label='c')
+        a = pcn.Layer(dim=5, label="a")
+        b = pcn.Layer(dim=4, activation=pcn.Relu(), label="b")
+        c = pcn.Layer(dim=3, label="c")
         p1 = pcn.Predict(a, b)
         pcn.Predict(b, c, precision_input=[p1.precision])  # prec source (nt 2)
     net.build()
-    return net, 'a', False
+    return net, "a", False
 
 
 def _n9_flow_gate_error_pre():
     net = pcn.PCNetwork(seed=0)
     with net:
-        a = pcn.Layer(dim=5, label='a')
-        b = pcn.Layer(dim=4, activation=pcn.Relu(), label='b')
-        c = pcn.Layer(dim=4, label='c')
+        a = pcn.Layer(dim=5, label="a")
+        b = pcn.Layer(dim=4, activation=pcn.Relu(), label="b")
+        c = pcn.Layer(dim=4, label="c")
         p1 = pcn.Predict(a, b)
         p2 = pcn.Predict(a, c)
         # Flow gate on p1 whose gating pre is p2's error node (reads carry err).
         pcn.Modulate(p2.error, p1.flow_to_pre)
     net.build()
-    return net, 'a', False
+    return net, "a", False
 
 
 def _n10_delay_ts_leaky():
     net = pcn.PCNetwork(seed=0)
     with net:
-        l_in = pcn.Layer(dim=4, label='in')
-        z = pcn.Layer(dim=4, activation=pcn.Direct(), label='z')
+        l_in = pcn.Layer(dim=4, label="in")
+        z = pcn.Layer(dim=4, activation=pcn.Direct(), label="z")
         # Observation edge with a Leaky (memory) error -> error hist buffers.
         pcn.Predict(z, l_in, error_activation=pcn.Leaky(leak=0.3))
         # Transition edge with a timestep delay -> value hist buffer on z.
-        pcn.Predict(z, z, delay=1, delay_unit='timestep', use_bias=False)
+        pcn.Predict(z, z, delay=1, delay_unit="timestep", use_bias=False)
     net.build()
-    return net, 'in', True
+    return net, "in", True
 
 
 def build_matrix():
     """Return an ordered list of (name, builder) for the golden matrix."""
     return [
-        ('n01_plain', _n1_plain),
-        ('n02_leaky_error', _n2_leaky_error),
-        ('n03_leaky_precision', _n3_leaky_precision),
-        ('n04_error_routing', _n4_error_routing),
-        ('n05_precision_routing', _n5_precision_routing),
-        ('n06_pin_value', _n6_pin_value),
-        ('n07_pin_error', _n7_pin_error),
-        ('n08_pin_precision', _n8_pin_precision),
-        ('n09_flow_gate_error_pre', _n9_flow_gate_error_pre),
-        ('n10_delay_ts_leaky', _n10_delay_ts_leaky),
+        ("n01_plain", _n1_plain),
+        ("n02_leaky_error", _n2_leaky_error),
+        ("n03_leaky_precision", _n3_leaky_precision),
+        ("n04_error_routing", _n4_error_routing),
+        ("n05_precision_routing", _n5_precision_routing),
+        ("n06_pin_value", _n6_pin_value),
+        ("n07_pin_error", _n7_pin_error),
+        ("n08_pin_precision", _n8_pin_precision),
+        ("n09_flow_gate_error_pre", _n9_flow_gate_error_pre),
+        ("n10_delay_ts_leaky", _n10_delay_ts_leaky),
     ]
 
 
@@ -203,7 +202,7 @@ def _make_sample(net, input_label, temporal, T):
         arr = (0.5 * rng.standard_normal((_BATCH, T, dim))).astype(np.float32)
     else:
         arr = (0.5 * rng.standard_normal((_BATCH, dim))).astype(np.float32)
-    return {'in_data': jnp.asarray(arr)}
+    return {"in_data": jnp.asarray(arr)}
 
 
 def _flatten_log_list(prefix, log_list, out):
@@ -214,17 +213,23 @@ def _flatten_log_list(prefix, log_list, out):
 
 def _flatten_train_logs(prefix, logs, out):
     """Store sim.logs = {'values': [per-batch [per-node arr]], ...}."""
-    for kind in ('values', 'errors', 'precisions', 'deltas'):
+    for kind in ("values", "errors", "precisions", "deltas"):
         for bi, per_node in enumerate(logs[kind]):
             for ni, arr in enumerate(per_node):
                 out[f"{prefix}|{kind}|b{bi}|n{ni}"] = np.asarray(arr, dtype=np.float32)
 
 
 def _flatten_params(prefix, params, out):
-    for attr in ('predict_weights', 'predict_biases',
-                 'project_weights', 'project_biases',
-                 'modulate_weights', 'modulate_biases',
-                 'precision_weights', 'precision_biases'):
+    for attr in (
+        "predict_weights",
+        "predict_biases",
+        "project_weights",
+        "project_biases",
+        "modulate_weights",
+        "modulate_biases",
+        "precision_weights",
+        "precision_biases",
+    ):
         for i, arr in enumerate(getattr(params, attr)):
             out[f"{prefix}|{attr}|{i}"] = np.asarray(arr, dtype=np.float32)
 
@@ -240,34 +245,44 @@ def collect_net(name, builder, out):
 
     def fresh():
         net, in_label, _ = builder()
-        return net, {net[in_label]: 'in_data'}
+        return net, {net[in_label]: "in_data"}
 
     # --- test configs (return_logs) ---
     for cfg, kw in (
-        ('test_ff1', dict(feedforward_init=True)),
-        ('test_ff0', dict(feedforward_init=False)),
-        ('test_conv', dict(feedforward_init=True, convergence_threshold=0.05)),
+        ("test_ff1", {"feedforward_init": True}),
+        ("test_ff0", {"feedforward_init": False}),
+        ("test_conv", {"feedforward_init": True, "convergence_threshold": 0.05}),
     ):
         net, dmap = fresh()
         sample = _make_sample(net, input_label, temporal, T)
         sim = pcn.Simulation(net)
-        res = sim.test([sample], data_map=dmap,
-                       iterations_per_sample=iters_test, log_every=1,
-                       return_logs=True, **kw)
-        for kind in ('values', 'errors', 'precisions', 'deltas'):
+        res = sim.test(
+            [sample],
+            data_map=dmap,
+            iterations_per_sample=iters_test,
+            log_every=1,
+            return_logs=True,
+            **kw,
+        )
+        for kind in ("values", "errors", "precisions", "deltas"):
             _flatten_log_list(f"{name}|{cfg}|{kind}", res[kind], out)
-        for ei, e in enumerate(res['energies']):
+        for ei, e in enumerate(res["energies"]):
             out[f"{name}|{cfg}|energies|{ei}"] = np.asarray(e, dtype=np.float32)
 
     # --- train configs (save_logs) ---
-    for cfg, li in (('train_li0', 0), ('train_li2', li2)):
+    for cfg, li in (("train_li0", 0), ("train_li2", li2)):
         net, dmap = fresh()
         sample = _make_sample(net, input_label, temporal, T)
         sim = pcn.Simulation(net)
-        sim.train([sample], data_map=dmap, epochs=1,
-                  iterations_per_sample=iters_train,
-                  learning_iterations_per_sample=li,
-                  log_every=1, save_logs=True)
+        sim.train(
+            [sample],
+            data_map=dmap,
+            epochs=1,
+            iterations_per_sample=iters_train,
+            learning_iterations_per_sample=li,
+            log_every=1,
+            save_logs=True,
+        )
         _flatten_train_logs(f"{name}|{cfg}", sim.logs, out)
         _flatten_params(f"{name}|{cfg}|params", sim.params, out)
 
@@ -283,7 +298,7 @@ def collect_all():
 
 
 def main():
-    out_path = sys.argv[1] if len(sys.argv) > 1 else 'golden_phase2.npz'
+    out_path = sys.argv[1] if len(sys.argv) > 1 else "golden_phase2.npz"
     print("Collecting golden matrix (run #1) ...")
     a = collect_all()
     print(f"  {len(a)} arrays")
@@ -303,5 +318,5 @@ def main():
     print(f"Saved {len(a)} deterministic, NaN-free arrays to {out_path}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

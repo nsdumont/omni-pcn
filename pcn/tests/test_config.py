@@ -7,11 +7,11 @@ import tempfile
 import pytest
 
 import pcn
-from pcn.config import DEFAULTS, load_config, _DEFAULT
-from pcn.core.activations import activation_from_name, ACTIVATION_REGISTRY, Relu, Tanh, Direct
-
+from pcn.config import load_config
+from pcn.core.activations import ACTIVATION_REGISTRY, Relu, Tanh, activation_from_name
 
 # --- load_config ---
+
 
 def test_load_default_config():
     """load_config() with no args returns the built-in defaults."""
@@ -20,7 +20,6 @@ def test_load_default_config():
     assert "train" in cfg
     assert "test" in cfg
     assert cfg["model"]["dynamics_rate"] == 0.1
-
 
 
 def test_load_custom_config():
@@ -42,6 +41,7 @@ def test_load_custom_config():
 
 # --- activation_from_name ---
 
+
 def test_activation_from_name():
     """All registered names resolve correctly."""
     for name, cls in ACTIVATION_REGISTRY.items():
@@ -60,11 +60,11 @@ def test_activation_from_name_invalid():
 
 # --- PCNetwork.config ---
 
+
 def test_network_defaults_from_json():
     """PCNetwork._defaults are populated from the JSON at construction."""
     net = pcn.PCNetwork(seed=0)
     assert net._defaults["dynamics_rate"] == 0.1
-
 
 
 def test_network_config_kwargs():
@@ -74,13 +74,14 @@ def test_network_config_kwargs():
     assert net._defaults["dynamics_rate"] == 0.05
     assert net._defaults["init_precision"] == 2.0
     # Others unchanged
-    assert net._defaults["learn_precision_weights"] == True
-    assert net._defaults["learn_precision_bias"] == True
+    assert net._defaults["learn_precision_weights"]
+    assert net._defaults["learn_precision_bias"]
 
 
 def test_network_config_init_log_precision_bc():
     """Legacy ``init_log_precision`` kwarg is converted via exp."""
     import math
+
     net = pcn.PCNetwork(seed=0)
     net.config(init_log_precision=1.0)
     assert net._defaults["init_precision"] == pytest.approx(math.e)
@@ -104,6 +105,7 @@ def test_network_config_from_json():
 def test_network_config_from_json_init_log_precision_bc():
     """Legacy ``init_log_precision`` in JSON is converted via exp."""
     import math
+
     custom = {"model": {"init_log_precision": 1.0}}
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(custom, f)
@@ -139,6 +141,7 @@ def test_network_config_string_activation():
 
 # --- Predict uses config defaults ---
 
+
 def test_predict_uses_config_defaults():
     """Predict picks up init_precision from config."""
     net = pcn.PCNetwork(seed=0)
@@ -164,6 +167,7 @@ def test_predict_explicit_overrides_config():
 def test_predict_init_log_precision_bc():
     """Legacy ``init_log_precision`` kwarg still works on Predict()."""
     import math
+
     net = pcn.PCNetwork(seed=0)
     with net:
         l1 = pcn.Layer(dim=4, label="a")
@@ -174,6 +178,7 @@ def test_predict_init_log_precision_bc():
 
 
 # --- Layer uses config defaults ---
+
 
 def test_layer_uses_config_activation():
     """Layer picks up activation from config when not specified."""
@@ -195,6 +200,7 @@ def test_layer_explicit_activation_overrides():
 
 # --- Simulation.config ---
 
+
 def test_simulation_config():
     """sim.config() stores values in train/test defaults."""
     net = pcn.PCNetwork(seed=0)
@@ -209,7 +215,6 @@ def test_simulation_config():
     assert sim._test_defaults["iterations_per_sample"] == 50
 
 
-
 def test_simulation_config_convergence_threshold():
     """sim.config() sets convergence_threshold in both train and test."""
     net = pcn.PCNetwork(seed=0)
@@ -222,8 +227,6 @@ def test_simulation_config_convergence_threshold():
     sim.config(convergence_threshold=1e-4)
     assert sim._train_defaults["convergence_threshold"] == 1e-4
     assert sim._test_defaults["convergence_threshold"] == 1e-4
-
-
 
 
 def test_simulation_config_from_json():
