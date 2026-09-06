@@ -33,36 +33,36 @@ sparse ≈ 16 B/nse (+ 8 B/nse Adam) + 4 B·(post + pre).
 from __future__ import annotations
 
 import os
-from typing import NamedTuple, Tuple
+from typing import NamedTuple
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax, tree_util
 from jax.experimental.sparse import BCSR, bcsr_dot_general
 
 # cuSPARSE lowering of BCSR/BCOO products is OFF by default in JAX 0.9.x.
 # Harmless on non-CUDA backends (only affects GPU lowering).
-jax.config.update('jax_bcoo_cusparse_lowering', True)
+jax.config.update("jax_bcoo_cusparse_lowering", True)
 
 #: Chunk size (in nonzeros) for the sampled weight gradient. Sweep on an RTX
 #: 5090 (B=128): 2**16–2**18 is within 10% of the best at every nse tested;
 #: a single-chunk map falls onto XLA's slow reduce fusion (8x cliff), so
 #: :func:`sampled_outer` always forces at least two chunks.
-SPARSE_CHUNK: int = 2 ** 18
+SPARSE_CHUNK: int = 2**18
 #: ``sparse='auto'`` picks the sparse representation iff
 #: ``density <= AUTO_MAX_DENSITY and post*pre >= AUTO_MIN_SIZE``.
 #: Measured: speed win at <= ~2% density, break-even ~5%; below ~1024**2
 #: the dense product is launch-bound and nothing matters.
 AUTO_MAX_DENSITY: float = 0.05
-AUTO_MIN_SIZE: int = 2 ** 20
+AUTO_MIN_SIZE: int = 2**20
 #: jax-mps (Metal) has no ``custom_call`` handler, so cuSPARSE is impossible
 #: there and the generic lowering is unverified. ``sparse=`` falls back to the
 #: dense-masked path on Metal unless this is True (env ``PCN_SPARSE_ON_METAL=1``
 #: or set ``pcn.core.sparse.SPARSE_ON_METAL = True`` before ``build()``).
-SPARSE_ON_METAL: bool = os.environ.get('PCN_SPARSE_ON_METAL', '0') == '1'
+SPARSE_ON_METAL: bool = os.environ.get("PCN_SPARSE_ON_METAL", "0") == "1"
 
-_DN = (((1,), (0,)), ((), ()))   # W (post, pre) contracted with X (pre, B)
+_DN = (((1,), (0,)), ((), ()))  # W (post, pre) contracted with X (pre, B)
 
 
 class SparseWeight(NamedTuple):
@@ -79,6 +79,7 @@ class SparseWeight(NamedTuple):
             CSR data and ``indices[t_perm, 0]`` its column indices.
         shape: static ``(post_dim, pre_dim)``.
     """
+
     data: jnp.ndarray
     indices: jnp.ndarray
     indptr: jnp.ndarray
@@ -107,22 +108,28 @@ class SparseWeight(NamedTuple):
         return f"SparseWeight(shape={tuple(self.shape)}, nse={self.nse}, dtype={self.data.dtype})"
 
     # ---- conversions ---------------------------------------------------
-    def with_data(self, data) -> 'SparseWeight':
+    def with_data(self, data) -> SparseWeight:
         """Same structure, new ``data`` (shape ``(nse,)``)."""
         return self._replace(data=data)
 
     def todense(self) -> jnp.ndarray:
         """Materialise the dense ``(post_dim, pre_dim)`` matrix (explicit, never implicit)."""
-        return jnp.zeros(tuple(self.shape), self.data.dtype).at[
-            self.indices[:, 0], self.indices[:, 1]].set(self.data)
+        return (
+            jnp.zeros(tuple(self.shape), self.data.dtype)
+            .at[self.indices[:, 0], self.indices[:, 1]]
+            .set(self.data)
+        )
 
     def dense_mask(self) -> jnp.ndarray:
         """Binary ``(post_dim, pre_dim)`` float32 mask of the structure."""
-        return jnp.zeros(tuple(self.shape), jnp.float32).at[
-            self.indices[:, 0], self.indices[:, 1]].set(1.0)
+        return (
+            jnp.zeros(tuple(self.shape), jnp.float32)
+            .at[self.indices[:, 0], self.indices[:, 1]]
+            .set(1.0)
+        )
 
     @classmethod
-    def from_indices(cls, rows, cols, shape, data) -> 'SparseWeight':
+    def from_indices(cls, rows, cols, shape, data) -> SparseWeight:
         """Build from parallel ``rows``/``cols``/``data`` (any order, no duplicates)."""
         shape = _check_shape(shape)
         rows = np.asarray(rows, dtype=np.int64).reshape(-1)
@@ -131,17 +138,18 @@ class SparseWeight(NamedTuple):
         if not (rows.shape == cols.shape == data.shape):
             raise ValueError(
                 f"rows/cols/data must have the same length, got "
-                f"{rows.shape}, {cols.shape}, {data.shape}")
+                f"{rows.shape}, {cols.shape}, {data.shape}"
+            )
         _check_ranges(rows, cols, shape)
         flat = rows * shape[1] + cols
-        order = np.argsort(flat, kind='stable')
+        order = np.argsort(flat, kind="stable")
         flat = flat[order]
         if flat.size and np.any(flat[1:] == flat[:-1]):
             raise ValueError("SparseWeight.from_indices: duplicate (row, col) entries")
         return cls._build(rows[order], cols[order], shape, data[order])
 
     @classmethod
-    def from_dense(cls, W, mask=None) -> 'SparseWeight':
+    def from_dense(cls, W, mask=None) -> SparseWeight:
         """Extract the nonzeros of ``W`` (or of ``W`` where ``mask != 0``)."""
         W = np.asarray(W, dtype=np.float32)
         shape = _check_shape(W.shape)
@@ -152,7 +160,7 @@ class SparseWeight(NamedTuple):
         return cls._build(rows, cols, shape, W[rows, cols])
 
     @classmethod
-    def _build(cls, rows, cols, shape, data) -> 'SparseWeight':
+    def _build(cls, rows, cols, shape, data) -> SparseWeight:
         """``rows``/``cols`` already row-major sorted and unique."""
         indptr, t_indptr, t_perm = build_csr_csc(rows, cols, shape)
         indices = np.stack([rows, cols], axis=1).astype(np.int32)
@@ -180,7 +188,8 @@ tree_util.register_pytree_node(
 # Structure helpers (host-side numpy)
 # ============================================================================
 
-def _check_shape(shape) -> Tuple[int, int]:
+
+def _check_shape(shape) -> tuple[int, int]:
     shape = tuple(int(s) for s in shape)
     if len(shape) != 2 or min(shape) <= 0:
         raise ValueError(f"SparseWeight shape must be 2-D with positive dims, got {shape}")
@@ -188,8 +197,9 @@ def _check_shape(shape) -> Tuple[int, int]:
 
 
 def _check_ranges(rows, cols, shape) -> None:
-    if rows.size and (rows.min() < 0 or rows.max() >= shape[0]
-                      or cols.min() < 0 or cols.max() >= shape[1]):
+    if rows.size and (
+        rows.min() < 0 or rows.max() >= shape[0] or cols.min() < 0 or cols.max() >= shape[1]
+    ):
         raise ValueError(f"sparse indices out of range for shape {shape}")
 
 
@@ -203,7 +213,7 @@ def build_csr_csc(rows, cols, shape):
     rows = np.asarray(rows, dtype=np.int64)
     cols = np.asarray(cols, dtype=np.int64)
     indptr = np.concatenate([[0], np.cumsum(np.bincount(rows, minlength=post))]).astype(np.int32)
-    t_perm = np.lexsort((rows, cols)).astype(np.int32)     # sort by (col, row)
+    t_perm = np.lexsort((rows, cols)).astype(np.int32)  # sort by (col, row)
     t_indptr = np.concatenate([[0], np.cumsum(np.bincount(cols, minlength=pre))]).astype(np.int32)
     return indptr, t_indptr, t_perm
 
@@ -212,14 +222,12 @@ def is_index_mask(mask) -> bool:
     """True for the sparse mask formats: ``(rows, cols)`` tuple, ``scipy.sparse``, ``BCOO``/``BCSR``."""
     if isinstance(mask, tuple) and len(mask) == 2:
         return True
-    if hasattr(mask, 'tocoo'):                      # scipy.sparse
+    if hasattr(mask, "tocoo"):  # scipy.sparse
         return True
-    if hasattr(mask, 'indices') and hasattr(mask, 'data') and hasattr(mask, 'shape'):
-        return True                                 # jax.experimental.sparse BCOO / BCSR
-    return False
+    return hasattr(mask, "indices") and hasattr(mask, "data") and hasattr(mask, "shape")
 
 
-def mask_to_indices(mask, shape) -> Tuple[np.ndarray, np.ndarray]:
+def mask_to_indices(mask, shape) -> tuple[np.ndarray, np.ndarray]:
     """Normalise any supported mask format to row-major sorted, unique ``(rows, cols)``.
 
     Accepted: a dense ``(post, pre)`` array (nonzeros are kept), a
@@ -233,21 +241,27 @@ def mask_to_indices(mask, shape) -> Tuple[np.ndarray, np.ndarray]:
         cols = np.asarray(mask[1]).reshape(-1)
         if rows.shape != cols.shape:
             raise ValueError("(rows, cols) mask: rows and cols must have the same length")
-        if rows.size and not (np.issubdtype(rows.dtype, np.integer)
-                              and np.issubdtype(cols.dtype, np.integer)):
+        if rows.size and not (
+            np.issubdtype(rows.dtype, np.integer) and np.issubdtype(cols.dtype, np.integer)
+        ):
             raise ValueError("(rows, cols) mask must contain integer indices")
-        rows = rows.astype(np.int64); cols = cols.astype(np.int64)
-    elif hasattr(mask, 'tocoo'):                    # scipy.sparse
+        rows = rows.astype(np.int64)
+        cols = cols.astype(np.int64)
+    elif hasattr(mask, "tocoo"):  # scipy.sparse
         if tuple(mask.shape) != shape:
-            raise ValueError(f"weight_mask shape {tuple(mask.shape)} does not match expected {shape}.")
+            raise ValueError(
+                f"weight_mask shape {tuple(mask.shape)} does not match expected {shape}."
+            )
         coo = mask.tocoo()
         keep = np.asarray(coo.data) != 0
         rows = np.asarray(coo.row)[keep].astype(np.int64)
         cols = np.asarray(coo.col)[keep].astype(np.int64)
-    elif hasattr(mask, 'indices') and hasattr(mask, 'data') and hasattr(mask, 'shape'):
+    elif hasattr(mask, "indices") and hasattr(mask, "data") and hasattr(mask, "shape"):
         if tuple(mask.shape) != shape:
-            raise ValueError(f"weight_mask shape {tuple(mask.shape)} does not match expected {shape}.")
-        bcoo = mask.to_bcoo() if hasattr(mask, 'to_bcoo') else mask
+            raise ValueError(
+                f"weight_mask shape {tuple(mask.shape)} does not match expected {shape}."
+            )
+        bcoo = mask.to_bcoo() if hasattr(mask, "to_bcoo") else mask
         idx = np.asarray(bcoo.indices)
         keep = np.asarray(bcoo.data) != 0
         rows = idx[keep, 0].astype(np.int64)
@@ -257,13 +271,14 @@ def mask_to_indices(mask, shape) -> Tuple[np.ndarray, np.ndarray]:
         if dense.shape != shape:
             raise ValueError(f"weight_mask shape {dense.shape} does not match expected {shape}.")
         rows, cols = np.nonzero(dense)
-        rows = rows.astype(np.int64); cols = cols.astype(np.int64)
+        rows = rows.astype(np.int64)
+        cols = cols.astype(np.int64)
     _check_ranges(rows, cols, shape)
-    flat = np.unique(rows * shape[1] + cols)        # sorted row-major, deduplicated
+    flat = np.unique(rows * shape[1] + cols)  # sorted row-major, deduplicated
     return flat // shape[1], flat % shape[1]
 
 
-def band_indices(m, n, n_bands) -> Tuple[np.ndarray, np.ndarray]:
+def band_indices(m, n, n_bands) -> tuple[np.ndarray, np.ndarray]:
     """Row-major sorted indices of ``|i - j| <= n_bands`` for an ``(m, n)`` matrix.
 
     Same set as ``PCNetwork._make_band_mask(m, n, n_bands)`` (absolute index
@@ -275,7 +290,9 @@ def band_indices(m, n, n_bands) -> Tuple[np.ndarray, np.ndarray]:
     counts = np.maximum(0, hi - lo + 1)
     rows = np.repeat(i, counts)
     starts = np.repeat(lo, counts)
-    offsets = np.arange(counts.sum(), dtype=np.int64) - np.repeat(np.cumsum(counts) - counts, counts)
+    offsets = np.arange(counts.sum(), dtype=np.int64) - np.repeat(
+        np.cumsum(counts) - counts, counts
+    )
     return rows, starts + offsets
 
 
@@ -290,7 +307,7 @@ def resolve_sparse_mode(mode, nse: int, shape) -> bool:
     """Turn ``sparse=True | 'auto'`` into a decision for a given structure."""
     if mode is True:
         return True
-    if mode == 'auto':
+    if mode == "auto":
         size = int(shape[0]) * int(shape[1])
         return size >= AUTO_MIN_SIZE and nse / size <= AUTO_MAX_DENSITY
     return False
@@ -299,6 +316,7 @@ def resolve_sparse_mode(mode, nse: int, shape) -> bool:
 # ============================================================================
 # Backend helpers: split the learnable leaf out of a weight, and put it back
 # ============================================================================
+
 
 def learnable_leaf(w):
     """The optax-facing leaf of a weight: ``w.data`` for SparseWeight, else ``w``."""
@@ -314,9 +332,9 @@ def rebuild_weight(original, leaf):
 # Kernels
 # ============================================================================
 
+
 def _csr(data, cols, indptr, shape):
-    return BCSR((data, cols, indptr), shape=tuple(shape),
-                indices_sorted=True, unique_indices=True)
+    return BCSR((data, cols, indptr), shape=tuple(shape), indices_sorted=True, unique_indices=True)
 
 
 def sampled_outer(g, x, indices, chunk: int = SPARSE_CHUNK) -> jnp.ndarray:
@@ -344,7 +362,7 @@ def sampled_outer(g, x, indices, chunk: int = SPARSE_CHUNK) -> jnp.ndarray:
     gT, xT = g.T, x.T
 
     def _chunk(c):
-        return jnp.einsum('nb,nb->n', gT[c[:, 0]], xT[c[:, 1]])
+        return jnp.einsum("nb,nb->n", gT[c[:, 0]], xT[c[:, 1]])
 
     return lax.map(_chunk, ic).reshape(-1)[:nse]
 
@@ -371,8 +389,8 @@ def _sparse_matmul_bwd(res, g):
     w, x = res
     post, pre = w.shape
     WT = _csr(w.data[w.t_perm], w.indices[w.t_perm, 0], w.t_indptr, (pre, post))
-    gx = bcsr_dot_general(WT, g.T, dimension_numbers=_DN).T          # (B, pre)
-    gd = sampled_outer(g, x, w.indices)                               # (nse,)
+    gx = bcsr_dot_general(WT, g.T, dimension_numbers=_DN).T  # (B, pre)
+    gd = sampled_outer(g, x, w.indices)  # (nse,)
     # Structure leaves are integer-valued: symbolic-zero cotangents.
     return SparseWeight(gd, None, None, None, None, w.shape), gx
 
@@ -381,8 +399,19 @@ sparse_matmul.defvjp(_sparse_matmul_fwd, _sparse_matmul_bwd)
 
 
 __all__ = [
-    'SparseWeight', 'sparse_matmul', 'sampled_outer',
-    'mask_to_indices', 'band_indices', 'indices_to_dense_mask', 'is_index_mask',
-    'build_csr_csc', 'resolve_sparse_mode', 'learnable_leaf', 'rebuild_weight',
-    'SPARSE_CHUNK', 'AUTO_MAX_DENSITY', 'AUTO_MIN_SIZE', 'SPARSE_ON_METAL',
+    "SparseWeight",
+    "sparse_matmul",
+    "sampled_outer",
+    "mask_to_indices",
+    "band_indices",
+    "indices_to_dense_mask",
+    "is_index_mask",
+    "build_csr_csc",
+    "resolve_sparse_mode",
+    "learnable_leaf",
+    "rebuild_weight",
+    "SPARSE_CHUNK",
+    "AUTO_MAX_DENSITY",
+    "AUTO_MIN_SIZE",
+    "SPARSE_ON_METAL",
 ]

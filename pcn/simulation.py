@@ -5,20 +5,24 @@ Note: For maximum performance, use the backend.run_batch function directly
 (see examples/mnist_discriminative.py). This class provides a convenient interface.
 """
 
-from typing import Any, Dict, List, Optional, Union, Iterator
+import time
+from collections.abc import Iterator
 from pathlib import Path
-import numpy as np
+from typing import Any
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
-import time
 from tqdm import tqdm
-from .core.sparse import learnable_leaf
-from .core.network import PCNetwork
-from .core.layer import Layer, NodeRef
-from .core.state import NetworkState, NetworkParams
+
 from .backend import run_batch
-from .config import DEFAULTS, load_config, _DEFAULT, validate_keys
+from .config import _DEFAULT, DEFAULTS, load_config, validate_keys
+from .core.layer import Layer, NodeRef
+from .core.network import PCNetwork
+from .core.sparse import learnable_leaf
+from .core.state import NetworkParams
+
 
 def _is_tuple_of_type(obj, item_type):
     return isinstance(obj, tuple) and all(isinstance(item, item_type) for item in obj)
@@ -55,13 +59,10 @@ class Simulation:
         print(results['accuracy'])  # list of per-batch results
     """
 
-    def __init__(
-        self, net: PCNetwork        
-    ):
+    def __init__(self, net: PCNetwork):
         if net.structure is None:
             raise RuntimeError(
-                "Network must be built before creating Simulation. "
-                "Call net.build() first."
+                "Network must be built before creating Simulation. Call net.build() first."
             )
 
         self.net = net
@@ -82,7 +83,7 @@ class Simulation:
             precision_biases=list(self.net.params.precision_biases),
         )
 
-    def config(self, config_file=None, **kwargs) -> 'Simulation':
+    def config(self, config_file=None, **kwargs) -> "Simulation":
         """Set default values for simulation parameters.
 
         Args:
@@ -104,14 +105,13 @@ class Simulation:
             full = load_config(config_file)
             self._train_defaults.update(full.get("train", {}))
             self._test_defaults.update(full.get("test", {}))
-        validate_keys(('train', 'test'),
-                      [k for k in kwargs if k not in ('train', 'test')])
+        validate_keys(("train", "test"), [k for k in kwargs if k not in ("train", "test")])
         for k, v in kwargs.items():
-            if k == 'train':
-                validate_keys('train', v)
+            if k == "train":
+                validate_keys("train", v)
                 self._train_defaults.update(v)
-            elif k == 'test':
-                validate_keys('test', v)
+            elif k == "test":
+                validate_keys("test", v)
                 self._test_defaults.update(v)
             if k in self._train_defaults:
                 self._train_defaults[k] = v
@@ -151,22 +151,25 @@ class Simulation:
         if is_stochastic:
             return True
         structure = self.net.structure
-        if getattr(structure, 'inference_regs', ()) or getattr(structure, 'train_regs', ()):
+        if getattr(structure, "inference_regs", ()) or getattr(structure, "train_regs", ()):
             return True
-        if any(float(getattr(l, 'dropout_prob', 0.0)) > 0.0 for l in structure.layers):
+        if any(float(getattr(l, "dropout_prob", 0.0)) > 0.0 for l in structure.layers):
             return True
         # GD loss_fns / three-factor reward_fns receive folded sub-keys;
         # assume they may consume them.
-        if getattr(self.net, '_reward_fns', ()) or getattr(self.net, '_loss_fns', ()):
+        if getattr(self.net, "_reward_fns", ()) or getattr(self.net, "_loss_fns", ()):
             return True
         return any(
-            a is not None and getattr(a, 'needs_key', False)
-            for acts in (getattr(self.net, 'layer_activations', ()),
-                         getattr(self.net, 'predict_error_activations', ()),
-                         getattr(self.net, 'predict_precision_activations', ()))
-            for a in acts)
+            a is not None and getattr(a, "needs_key", False)
+            for acts in (
+                getattr(self.net, "layer_activations", ()),
+                getattr(self.net, "predict_error_activations", ()),
+                getattr(self.net, "predict_precision_activations", ()),
+            )
+            for a in acts
+        )
 
-    def _convert_map(self, data_map: Dict[Any, Any]):
+    def _convert_map(self, data_map: dict[Any, Any]):
         """
         Convert a user-defined map with Layer/NodeRef/int/str keys into a
         tuple of (resolved_key, value) pairs using the network's layer indices.
@@ -180,7 +183,7 @@ class Simulation:
         """
         converted = {}
         for key, value in data_map.items():
-            if isinstance(key, str) and key == 'class':
+            if isinstance(key, str) and key == "class":
                 converted[-1] = value
             elif isinstance(key, tuple):
                 resolved = tuple(self._resolve_key(elem) for elem in key)
@@ -217,13 +220,13 @@ class Simulation:
         present both are returned unchanged.
         """
         from .core.sensory.base import SensoryInput
+
         layers = self.net._layers
         patched = []
         out_sample = sample
         copied = False
         for key, value in data_map_tuple:
-            layer = (layers[key]
-                     if isinstance(key, int) and 0 <= key < len(layers) else None)
+            layer = layers[key] if isinstance(key, int) and 0 <= key < len(layers) else None
             if isinstance(layer, SensoryInput):
                 if not copied:
                     out_sample = dict(sample)
@@ -237,7 +240,8 @@ class Simulation:
                 else:
                     mask_key_new = f"__sensory_mask_{key}"
                     out_sample[mask_key_new] = self._broadcast_clamp_mask(
-                        jnp.asarray(sample[value[1]]), feat.shape)
+                        jnp.asarray(sample[value[1]]), feat.shape
+                    )
                     patched.append((key, (feat_key, mask_key_new)))
             else:
                 patched.append((key, value))
@@ -251,11 +255,11 @@ class Simulation:
         -> ``(B, T, feat_dim)`` via a single vectorized encode over ``B*T``.
         """
         data = jnp.asarray(data)
-        if data.ndim == 3:                                    # (B, T, raw_dim)
+        if data.ndim == 3:  # (B, T, raw_dim)
             b, t = data.shape[0], data.shape[1]
             feat = layer.encode(data.reshape(b * t, data.shape[2]))
             return feat.reshape(b, t, feat.shape[-1])
-        return layer.encode(data)                             # (B, raw_dim)
+        return layer.encode(data)  # (B, raw_dim)
 
     @staticmethod
     def _broadcast_clamp_mask(mask, feat_shape):
@@ -308,6 +312,7 @@ class Simulation:
         Returns:
             List of arrays to pass as positional args to the record function.
         """
+
         def _get_array(elem):
             if isinstance(elem, str):
                 return sample[elem]
@@ -321,7 +326,11 @@ class Simulation:
         if isinstance(resolved_key, str):
             # Single sample key
             return [sample[resolved_key]]
-        elif isinstance(resolved_key, tuple) and len(resolved_key) == 2 and isinstance(resolved_key[0], int):
+        elif (
+            isinstance(resolved_key, tuple)
+            and len(resolved_key) == 2
+            and isinstance(resolved_key[0], int)
+        ):
             # Single node: (node_type, layer_idx)
             node_type, layer_idx = resolved_key
             return [node_arrays[node_type][layer_idx]]
@@ -333,23 +342,23 @@ class Simulation:
 
     def train(
         self,
-        dataloader: Iterator[Dict[str, Any]],
-        data_map: Dict[Union[Layer, int], str],
+        dataloader: Iterator[dict[str, Any]],
+        data_map: dict[Layer | int, str],
         epochs: int = 1,
         iterations_per_sample=_DEFAULT,
         learning_iterations_per_sample=_DEFAULT,
         log_every=_DEFAULT,
         convergence_threshold=_DEFAULT,
-        values_optimizer: Optional[optax.GradientTransformation] = None,
-        params_optimizer: Optional[optax.GradientTransformation] = None,
+        values_optimizer: optax.GradientTransformation | None = None,
+        params_optimizer: optax.GradientTransformation | None = None,
         reset_values_opt_state: bool = False,
-        record_map: Optional[Dict[str, tuple]] = None,
+        record_map: dict[str, tuple] | None = None,
         verbose: bool = False,
         is_stochastic: bool = False,
         log_initial: bool = False,
         feedforward_init: bool = True,
         save_logs: bool = _DEFAULT,
-    ) -> 'Simulation':
+    ) -> "Simulation":
         """
         Train the network on data from the dataloader.
 
@@ -384,7 +393,7 @@ class Simulation:
                 Defaults to optax.adam(1e-4). State is managed internally and
                 reset whenever this argument changes between train() calls.
 
-                The trainable param dict passed to the optimizer has 
+                The trainable param dict passed to the optimizer has
                 top-level keys: ``'predict_weights'``, ``'predict_biases'``,
                 ``'precision_weights'``, ``'precision_biases'``,
                 ``'gd_loss_project_weights'``, ``'gd_loss_modulate_weights'``.
@@ -433,10 +442,22 @@ class Simulation:
         # behaviour for callers that read ``sim.logs``).
         if save_logs is _DEFAULT:
             save_logs = log_every is not _DEFAULT
-        iterations_per_sample = iterations_per_sample if iterations_per_sample is not _DEFAULT else td['iterations_per_sample']
-        learning_iterations_per_sample = learning_iterations_per_sample if learning_iterations_per_sample is not _DEFAULT else td['learning_iterations_per_sample']
-        log_every = log_every if log_every is not _DEFAULT else td['log_every']
-        convergence_threshold = convergence_threshold if convergence_threshold is not _DEFAULT else td.get('convergence_threshold', 0.0)
+        iterations_per_sample = (
+            iterations_per_sample
+            if iterations_per_sample is not _DEFAULT
+            else td["iterations_per_sample"]
+        )
+        learning_iterations_per_sample = (
+            learning_iterations_per_sample
+            if learning_iterations_per_sample is not _DEFAULT
+            else td["learning_iterations_per_sample"]
+        )
+        log_every = log_every if log_every is not _DEFAULT else td["log_every"]
+        convergence_threshold = (
+            convergence_threshold
+            if convergence_threshold is not _DEFAULT
+            else td.get("convergence_threshold", 0.0)
+        )
         if log_every is None:
             log_every = iterations_per_sample + learning_iterations_per_sample
         data_map_tuple = self._convert_map(data_map)
@@ -444,25 +465,31 @@ class Simulation:
         # Resolve params optimizer and (re)initialize state if changed
         if params_optimizer is None:
             params_optimizer = optax.adam(1e-4)
-        if not hasattr(self, '_params_optimizer') or self._params_optimizer is not params_optimizer:
+        if not hasattr(self, "_params_optimizer") or self._params_optimizer is not params_optimizer:
             self._params_optimizer = params_optimizer
             structure = self.net.structure
             trainable = {
-                'predict_weights': tuple(learnable_leaf(w) for w in self.params.predict_weights),
-                'predict_biases': tuple(self.params.predict_biases),
-                'project_biases': tuple(self.params.project_biases),
-                'modulate_biases': tuple(self.params.modulate_biases),
-                'precision_weights': tuple(self.params.precision_weights),
-                'precision_biases': tuple(self.params.precision_biases),
-                'gd_loss_project_weights': tuple(learnable_leaf(self.params.project_weights[idx]) for idx, _ in structure.gd_loss_project),
-                'gd_loss_modulate_weights': tuple(learnable_leaf(self.params.modulate_weights[idx]) for idx, _ in structure.gd_loss_modulate),
+                "predict_weights": tuple(learnable_leaf(w) for w in self.params.predict_weights),
+                "predict_biases": tuple(self.params.predict_biases),
+                "project_biases": tuple(self.params.project_biases),
+                "modulate_biases": tuple(self.params.modulate_biases),
+                "precision_weights": tuple(self.params.precision_weights),
+                "precision_biases": tuple(self.params.precision_biases),
+                "gd_loss_project_weights": tuple(
+                    learnable_leaf(self.params.project_weights[idx])
+                    for idx, _ in structure.gd_loss_project
+                ),
+                "gd_loss_modulate_weights": tuple(
+                    learnable_leaf(self.params.modulate_weights[idx])
+                    for idx, _ in structure.gd_loss_modulate
+                ),
             }
             self._params_opt_state = self._params_optimizer.init(trainable)
 
         # Resolve values optimizer; state is initialised inside run_batch on first call
         if values_optimizer is None:
             values_optimizer = optax.sgd(1.0)
-        if not hasattr(self, '_values_optimizer') or self._values_optimizer is not values_optimizer:
+        if not hasattr(self, "_values_optimizer") or self._values_optimizer is not values_optimizer:
             self._values_optimizer = values_optimizer
             self._values_opt_state = None  # will be initialised inside run_batch
 
@@ -473,7 +500,7 @@ class Simulation:
         all_energies = []
         self.train_records = {name: [] for name, _, _ in record_entries}
         if save_logs:
-            self.logs = {'values': [], 'errors': [], 'precisions': [], 'deltas': []}
+            self.logs = {"values": [], "errors": [], "precisions": [], "deltas": []}
 
         # Only pay a per-batch RNG split when the compiled graph actually
         # consumes randomness; key=None takes run_batch's deterministic path.
@@ -495,8 +522,7 @@ class Simulation:
                 sample = {k: jnp.array(v) for k, v in sample.items()}
                 # Fixed sensory front-ends: transform raw data -> features once,
                 # outside inference (no-op when no SensoryInput is used).
-                sample, batch_data_map = self._apply_sensory_transforms(
-                    sample, data_map_tuple)
+                sample, batch_data_map = self._apply_sensory_transforms(sample, data_map_tuple)
 
                 # Run batch through consolidated function
                 if needs_rng:
@@ -504,14 +530,26 @@ class Simulation:
                 else:
                     batch_key = None
                 values_opt_to_pass = None if reset_values_opt_state else self._values_opt_state
-                self.params, self._params_opt_state, new_values_opt_state, values_log, errors_log, precisions_log, deltas_log, energies = run_batch(
-                    sample, self.params,
+                (
+                    self.params,
+                    self._params_opt_state,
+                    new_values_opt_state,
+                    values_log,
+                    errors_log,
+                    precisions_log,
+                    deltas_log,
+                    energies,
+                ) = run_batch(
+                    sample,
+                    self.params,
                     self.net.structure,
-                    batch_data_map, iterations_per_sample,
-                    log_every, learning=True,
+                    batch_data_map,
+                    iterations_per_sample,
+                    log_every,
+                    learning=True,
                     n_learning_iterations=learning_iterations_per_sample,
-                    reward_fns=getattr(self.net, '_reward_fns', ()),
-                    loss_fns=getattr(self.net, '_loss_fns', ()),
+                    reward_fns=getattr(self.net, "_reward_fns", ()),
+                    loss_fns=getattr(self.net, "_loss_fns", ()),
                     convergence_threshold=convergence_threshold,
                     key=batch_key,
                     values_optimizer=self._values_optimizer,
@@ -519,14 +557,16 @@ class Simulation:
                     params_optimizer=self._params_optimizer,
                     params_opt_state=self._params_opt_state,
                     is_stochastic=is_stochastic,
-                    spatial_neighborhoods=getattr(self.net, 'spatial_neighborhoods', ()),
+                    spatial_neighborhoods=getattr(self.net, "spatial_neighborhoods", ()),
                     log_initial=log_initial,
-                    predict_weight_masks=self.net.donatable_weight_masks('predict'),
-                    project_weight_masks=self.net.donatable_weight_masks('project'),
-                    modulate_weight_masks=self.net.donatable_weight_masks('modulate'),
-                    predict_error_activations=getattr(self.net, 'predict_error_activations', ()),
-                    predict_precision_activations=getattr(self.net, 'predict_precision_activations', ()),
-                    layer_activations=getattr(self.net, 'layer_activations', ()),
+                    predict_weight_masks=self.net.donatable_weight_masks("predict"),
+                    project_weight_masks=self.net.donatable_weight_masks("project"),
+                    modulate_weight_masks=self.net.donatable_weight_masks("modulate"),
+                    predict_error_activations=getattr(self.net, "predict_error_activations", ()),
+                    predict_precision_activations=getattr(
+                        self.net, "predict_precision_activations", ()
+                    ),
+                    layer_activations=getattr(self.net, "layer_activations", ()),
                     feedforward_init=feedforward_init,
                 )
                 if not reset_values_opt_state:
@@ -534,16 +574,20 @@ class Simulation:
                 all_energies.append(energies)
                 n_samples += 1
                 if save_logs:
-                    self.logs['values'].append(values_log)
-                    self.logs['errors'].append(errors_log)
-                    self.logs['precisions'].append(precisions_log)
-                    self.logs['deltas'].append(deltas_log)
+                    self.logs["values"].append(values_log)
+                    self.logs["errors"].append(errors_log)
+                    self.logs["precisions"].append(precisions_log)
+                    self.logs["deltas"].append(deltas_log)
 
                 # Apply record functions using final logged state. The
                 # node_arrays slices dispatch ~one device op per conn, so
                 # build them only when something will consume them.
                 if record_entries:
-                    node_arrays = [tuple(v[-1] for v in values_log), tuple(e[-1] for e in errors_log), tuple(p[-1] for p in precisions_log)]
+                    node_arrays = [
+                        tuple(v[-1] for v in values_log),
+                        tuple(e[-1] for e in errors_log),
+                        tuple(p[-1] for p in precisions_log),
+                    ]
                     for name, resolved_key, record_fn in record_entries:
                         args = self._resolve_record_args(resolved_key, node_arrays, raw_sample)
                         result = record_fn(*args)
@@ -555,9 +599,16 @@ class Simulation:
                 # Computed lazily from the collected energies (one host sync
                 # per epoch) instead of a per-batch device accumulation.
                 epoch_energies = all_energies[epoch_energy_start:]
-                avg_energy = (float(np.mean([np.asarray(e[-1]) for e in epoch_energies]))
-                              if n_samples > 0 else 0)
-                parts = [f"Epoch {epoch + 1}/{epochs}", f"Avg Energy {avg_energy:.3f}", f"Time {train_time:.1f}s"]
+                avg_energy = (
+                    float(np.mean([np.asarray(e[-1]) for e in epoch_energies]))
+                    if n_samples > 0
+                    else 0
+                )
+                parts = [
+                    f"Epoch {epoch + 1}/{epochs}",
+                    f"Avg Energy {avg_energy:.3f}",
+                    f"Time {train_time:.1f}s",
+                ]
                 for name, vals in epoch_records.items():
                     parts.append(f"{name}: {np.mean(vals):.4f}")
                 print(" | ".join(parts))
@@ -568,22 +619,21 @@ class Simulation:
 
         return self
 
-
     def test(
         self,
-        dataloader: Iterator[Dict[str, Any]],
-        data_map: Dict[Union[Layer, int], str],
+        dataloader: Iterator[dict[str, Any]],
+        data_map: dict[Layer | int, str],
         iterations_per_sample=_DEFAULT,
         log_every=_DEFAULT,
         convergence_threshold=_DEFAULT,
-        values_optimizer: Optional[optax.GradientTransformation] = None,
-        record_map: Optional[Dict[str, tuple]] = None,
+        values_optimizer: optax.GradientTransformation | None = None,
+        record_map: dict[str, tuple] | None = None,
         verbose: bool = False,
         is_stochastic: bool = False,
         log_initial: bool = False,
         feedforward_init: bool = True,
         return_logs: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Run inference and apply recording functions to collect results.
 
@@ -631,9 +681,17 @@ class Simulation:
         """
         td = self._test_defaults
         save_logs = log_every is not _DEFAULT
-        iterations_per_sample = iterations_per_sample if iterations_per_sample is not _DEFAULT else td['iterations_per_sample']
-        log_every = log_every if log_every is not _DEFAULT else td['log_every']
-        convergence_threshold = convergence_threshold if convergence_threshold is not _DEFAULT else td.get('convergence_threshold', 0.0)
+        iterations_per_sample = (
+            iterations_per_sample
+            if iterations_per_sample is not _DEFAULT
+            else td["iterations_per_sample"]
+        )
+        log_every = log_every if log_every is not _DEFAULT else td["log_every"]
+        convergence_threshold = (
+            convergence_threshold
+            if convergence_threshold is not _DEFAULT
+            else td.get("convergence_threshold", 0.0)
+        )
         if log_every is None:
             log_every = iterations_per_sample
 
@@ -646,7 +704,7 @@ class Simulation:
 
         if values_optimizer is None:
             values_optimizer = optax.sgd(1.0)
-        if not hasattr(self, '_values_optimizer') or self._values_optimizer is not values_optimizer:
+        if not hasattr(self, "_values_optimizer") or self._values_optimizer is not values_optimizer:
             self._values_optimizer = values_optimizer
             self._values_opt_state = None
 
@@ -654,12 +712,12 @@ class Simulation:
         time_start = time.time()
         results = {name: [] for name, _, _ in record_entries}
         n_samples = 0
-        results['values'] = []
-        results['errors'] = []
-        results['precisions'] = []
-        results['deltas'] = []
+        results["values"] = []
+        results["errors"] = []
+        results["precisions"] = []
+        results["deltas"] = []
         if save_logs:
-            self.logs = {'values': [], 'errors': [], 'precisions': [], 'deltas': []}
+            self.logs = {"values": [], "errors": [], "precisions": [], "deltas": []}
 
         needs_rng = self._needs_rng(is_stochastic)
 
@@ -669,48 +727,58 @@ class Simulation:
             sample = {k: jnp.array(v) for k, v in sample.items()}
             # Fixed sensory front-ends: transform raw data -> features once,
             # outside inference (no-op when no SensoryInput is used).
-            sample, batch_data_map = self._apply_sensory_transforms(
-                sample, data_map_tuple)
+            sample, batch_data_map = self._apply_sensory_transforms(sample, data_map_tuple)
 
             if needs_rng:
                 self._rng_key, batch_key = jax.random.split(self._rng_key)
             else:
                 batch_key = None
-            self.params, _, _, values_log, errors_log, precisions_log, deltas_log, energies = run_batch(
-                sample, self.params,
-                self.net.structure,
-                batch_data_map, iterations_per_sample,
-                log_every, learning=False,
-                n_learning_iterations=0,
-                convergence_threshold=convergence_threshold,
-                key=batch_key,
-                values_optimizer=getattr(self, '_values_optimizer', optax.sgd(1.0)),
-                values_opt_state=None,
-                is_stochastic=is_stochastic,
-                spatial_neighborhoods=getattr(self.net, 'spatial_neighborhoods', ()),
-                log_initial=log_initial,
-                predict_error_activations=getattr(self.net, 'predict_error_activations', ()),
-                predict_precision_activations=getattr(self.net, 'predict_precision_activations', ()),
-                layer_activations=getattr(self.net, 'layer_activations', ()),
-                feedforward_init=feedforward_init,
+            self.params, _, _, values_log, errors_log, precisions_log, deltas_log, energies = (
+                run_batch(
+                    sample,
+                    self.params,
+                    self.net.structure,
+                    batch_data_map,
+                    iterations_per_sample,
+                    log_every,
+                    learning=False,
+                    n_learning_iterations=0,
+                    convergence_threshold=convergence_threshold,
+                    key=batch_key,
+                    values_optimizer=getattr(self, "_values_optimizer", optax.sgd(1.0)),
+                    values_opt_state=None,
+                    is_stochastic=is_stochastic,
+                    spatial_neighborhoods=getattr(self.net, "spatial_neighborhoods", ()),
+                    log_initial=log_initial,
+                    predict_error_activations=getattr(self.net, "predict_error_activations", ()),
+                    predict_precision_activations=getattr(
+                        self.net, "predict_precision_activations", ()
+                    ),
+                    layer_activations=getattr(self.net, "layer_activations", ()),
+                    feedforward_init=feedforward_init,
+                )
             )
             if return_logs:
-                results['values'].append(values_log)
-                results['errors'].append(errors_log)
-                results['precisions'].append(precisions_log)
-                results['deltas'].append(deltas_log)
+                results["values"].append(values_log)
+                results["errors"].append(errors_log)
+                results["precisions"].append(precisions_log)
+                results["deltas"].append(deltas_log)
             if save_logs:
-                self.logs['values'].append(values_log)
-                self.logs['errors'].append(errors_log)
-                self.logs['precisions'].append(precisions_log)
-                self.logs['deltas'].append(deltas_log)
+                self.logs["values"].append(values_log)
+                self.logs["errors"].append(errors_log)
+                self.logs["precisions"].append(precisions_log)
+                self.logs["deltas"].append(deltas_log)
 
             # Apply record functions using final logged state
             # Resolved keys can be:
             #   (node_type, layer_idx)  - single node
             #   ((node_type, layer_idx), 'key', ...)  - tuple of nodes and/or sample keys
             if record_entries:
-                node_arrays = [tuple(v[-1] for v in values_log), tuple(e[-1] for e in errors_log), tuple(p[-1] for p in precisions_log)]
+                node_arrays = [
+                    tuple(v[-1] for v in values_log),
+                    tuple(e[-1] for e in errors_log),
+                    tuple(p[-1] for p in precisions_log),
+                ]
                 for name, resolved_key, record_fn in record_entries:
                     args = self._resolve_record_args(resolved_key, node_arrays, raw_sample)
                     results[name].append(record_fn(*args))
@@ -720,14 +788,15 @@ class Simulation:
 
         test_time = time.time() - time_start
         if verbose:
-            avg_energy = (float(np.mean([np.asarray(e[-1]) for e in all_energies]))
-                          if n_samples > 0 else 0)
+            avg_energy = (
+                float(np.mean([np.asarray(e[-1]) for e in all_energies])) if n_samples > 0 else 0
+            )
             parts = [f"Avg Energy {avg_energy:.3f}", f"Time {test_time:.1f}s"]
             for name, vals in results.items():
                 parts.append(f"{name}: {jnp.mean(jnp.array(vals)):.4f}")
             print(" | ".join(parts))
 
-        results['energies'] = all_energies
+        results["energies"] = all_energies
         self.test_energies = all_energies
 
         if not return_logs:
@@ -736,22 +805,22 @@ class Simulation:
             # energies are still returned.
             return results
 
-        if not results['values']:
+        if not results["values"]:
             return results
 
-        n_iterations = results['values'][0][0].shape[0]
-        for name in ('values', 'errors', 'precisions', 'deltas'):
+        n_iterations = results["values"][0][0].shape[0]
+        for name in ("values", "errors", "precisions", "deltas"):
             batches = results[name]
             results[name] = [
-                jnp.concatenate(
-                    [batch[i].transpose(1, 0, 2) for batch in batches], axis=0
-                ).reshape(-1, n_iterations, batches[0][i].shape[-1])
+                jnp.concatenate([batch[i].transpose(1, 0, 2) for batch in batches], axis=0).reshape(
+                    -1, n_iterations, batches[0][i].shape[-1]
+                )
                 for i in range(len(batches[0]))
             ]
 
         return results
 
-    def save(self, path: Union[str, Path]) -> Path:
+    def save(self, path: str | Path) -> Path:
         """Save network parameters and optimizer states to a checkpoint directory.
 
         Creates ``path/network.h5`` (via net.save) and ``path/optimizer.pkl``
@@ -764,6 +833,7 @@ class Simulation:
             The resolved Path of the checkpoint directory.
         """
         import pickle
+
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
@@ -773,27 +843,27 @@ class Simulation:
 
         # Serialize optimizer states: convert JAX arrays → numpy for pickling
         def _to_numpy(x):
-            return np.array(x) if hasattr(x, 'shape') else x
+            return np.array(x) if hasattr(x, "shape") else x
 
         states = {
-            'params_opt_state': jax.tree_util.tree_map(
-                _to_numpy, getattr(self, '_params_opt_state', None)
+            "params_opt_state": jax.tree_util.tree_map(
+                _to_numpy, getattr(self, "_params_opt_state", None)
             ),
-            'values_opt_state': jax.tree_util.tree_map(
-                _to_numpy, getattr(self, '_values_opt_state', None)
+            "values_opt_state": jax.tree_util.tree_map(
+                _to_numpy, getattr(self, "_values_opt_state", None)
             ),
         }
-        with open(path / "optimizer.pkl", 'wb') as f:
+        with open(path / "optimizer.pkl", "wb") as f:
             pickle.dump(states, f)
 
         return path
 
     def load(
         self,
-        path: Union[str, Path],
-        params_optimizer: Optional[optax.GradientTransformation] = None,
-        values_optimizer: Optional[optax.GradientTransformation] = None,
-    ) -> 'Simulation':
+        path: str | Path,
+        params_optimizer: optax.GradientTransformation | None = None,
+        values_optimizer: optax.GradientTransformation | None = None,
+    ) -> "Simulation":
         """Load network parameters and optimizer states from a checkpoint directory.
 
         Call this after ``Simulation(net)`` and before ``train()``.  Pass the
@@ -814,6 +884,7 @@ class Simulation:
             self for method chaining.
         """
         import pickle
+
         path = Path(path)
 
         # Load network params and sync to self.params
@@ -839,15 +910,15 @@ class Simulation:
         # Restore optimizer states from pickle
         opt_path = path / "optimizer.pkl"
         if opt_path.exists():
-            with open(opt_path, 'rb') as f:
+            with open(opt_path, "rb") as f:
                 states = pickle.load(f)
-            if params_optimizer is not None and states.get('params_opt_state') is not None:
+            if params_optimizer is not None and states.get("params_opt_state") is not None:
                 self._params_opt_state = jax.tree_util.tree_map(
-                    jnp.array, states['params_opt_state']
+                    jnp.array, states["params_opt_state"]
                 )
-            if values_optimizer is not None and states.get('values_opt_state') is not None:
+            if values_optimizer is not None and states.get("values_opt_state") is not None:
                 self._values_opt_state = jax.tree_util.tree_map(
-                    jnp.array, states['values_opt_state']
+                    jnp.array, states["values_opt_state"]
                 )
 
         return self

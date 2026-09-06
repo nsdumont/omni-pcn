@@ -102,7 +102,7 @@ def _apply_transform(
         # cuSPARSE kernel; alpha / residual / bias applied around it exactly
         # as in the dense branches below.
         out = sparse_matmul(W, pre_act)
-        if alpha != 1.:
+        if alpha != 1.0:
             out = alpha * out
         if is_res:
             out = out + pre_value

@@ -49,38 +49,39 @@ learning (their weights are frozen; state-operator dynamics still run),
 Poisson layers (non-differentiable sampling).
 """
 
-from typing import Dict, Tuple, Any
+from typing import Any
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
 from jax import lax
 
-from ..core.sparse import learnable_leaf, rebuild_weight
-from ..core.structure import NetworkStructure
-from ..core.state import NetworkParams
 from ..core.activations import ACTIVATIONS, _nwta
+from ..core.sparse import learnable_leaf, rebuild_weight
+from ..core.state import NetworkParams
+from ..core.structure import NetworkStructure
 from .simulation import (
-    _inference_step,
-    _single_pass,
-    _recompute_errors_precisions,
-    _compute_energy,
-    _compute_deltas,
     _apply_mask,
+    _compute_deltas,
+    _compute_energy,
+    _inference_step,
     _read_delayed,
+    _recompute_errors_precisions,
+    _single_pass,
 )
 
-_LOSS_MODES = ('energy_final', 'energy_sum', 'objective', 'objective_sum')
+_LOSS_MODES = ("energy_final", "energy_sum", "objective", "objective_sum")
 
 
-@eqx.filter_jit(donate='all')
+@eqx.filter_jit(donate="all")
 def run_bptt_batch(
-    sample: Dict[str, jnp.ndarray],
+    sample: dict[str, jnp.ndarray],
     params: NetworkParams,
     structure: NetworkStructure,
     data_map: tuple,
     n_iterations: int,
-    loss_mode: str = 'energy_final',
+    loss_mode: str = "energy_final",
     objective_fn=None,
     truncation=None,
     key: jnp.ndarray = None,
@@ -97,7 +98,7 @@ def run_bptt_batch(
     predict_precision_activations: tuple = (),
     layer_activations: tuple = (),
     feedforward_init: bool = True,
-) -> Tuple[NetworkParams, Any, Any, tuple, tuple, tuple, tuple, jnp.ndarray, jnp.ndarray]:
+) -> tuple[NetworkParams, Any, Any, tuple, tuple, tuple, tuple, jnp.ndarray, jnp.ndarray]:
     """
     Run one BPTT batch: init -> clamp -> unrolled inference -> one weight update.
 
@@ -115,12 +116,13 @@ def run_bptt_batch(
     """
     if loss_mode not in _LOSS_MODES:
         raise ValueError(f"loss_mode must be one of {_LOSS_MODES}, got {loss_mode!r}")
-    if loss_mode in ('objective', 'objective_sum') and objective_fn is None:
+    if loss_mode in ("objective", "objective_sum") and objective_fn is None:
         raise ValueError(f"loss_mode={loss_mode!r} requires objective_fn")
-    if truncation == 0 and loss_mode in ('objective', 'objective_sum'):
+    if truncation == 0 and loss_mode in ("objective", "objective_sum"):
         raise ValueError(
             "truncation=0 stop-gradients the final state, which kills all "
-            "gradient flow into an objective loss; use an energy mode or K>=1")
+            "gradient flow into an objective loss; use an energy mode or K>=1"
+        )
     if n_iterations < 1:
         raise ValueError("run_bptt_batch requires n_iterations >= 1")
 
@@ -156,29 +158,40 @@ def run_bptt_batch(
 
     activation_types = tuple(layer.activation_type for layer in structure.layers)
     activation_temps = tuple(
-        float(getattr(layer, 'activation_temperature', 1.0)) for layer in structure.layers)
+        float(getattr(layer, "activation_temperature", 1.0)) for layer in structure.layers
+    )
     activation_winners = tuple(
-        int(getattr(layer, 'activation_num_winners', 0)) for layer in structure.layers)
+        int(getattr(layer, "activation_num_winners", 0)) for layer in structure.layers
+    )
     activation_thresholds = tuple(
-        tuple(getattr(layer, 'activation_thresholds', ())) for layer in structure.layers)
+        tuple(getattr(layer, "activation_thresholds", ())) for layer in structure.layers
+    )
 
     def _build_activation_fn(t, T, nw, thr):
         if thr:
-            return lambda x, _a=jnp.asarray(thr): jnp.maximum(x - _a, 0)
+            threshold = jnp.asarray(thr)
+            return lambda x: jnp.maximum(x - threshold, 0)
         if nw > 0:
             return lambda x, _nw=nw: _nwta(x, _nw)
         if T == 1.0:
             return ACTIVATIONS[t]
         return lambda x, _t=t, _T=T: ACTIVATIONS[_t](x / _T)
+
     activation_fns = tuple(
         _build_activation_fn(t, T, nw, thr)
-        for t, T, nw, thr in zip(activation_types, activation_temps,
-                                 activation_winners, activation_thresholds))
+        for t, T, nw, thr in zip(
+            activation_types,
+            activation_temps,
+            activation_winners,
+            activation_thresholds,
+            strict=False,
+        )
+    )
     is_poisson_types = tuple(layer.is_poisson for layer in structure.layers)
-    _layer_acts = layer_activations if any(
-        getattr(a, 'needs_key', False) for a in layer_activations) else ()
-    dropout_probs = tuple(
-        float(getattr(layer, 'dropout_prob', 0.0)) for layer in structure.layers)
+    _layer_acts = (
+        layer_activations if any(getattr(a, "needs_key", False) for a in layer_activations) else ()
+    )
+    dropout_probs = tuple(float(getattr(layer, "dropout_prob", 0.0)) for layer in structure.layers)
 
     if key is None:
         key = jax.random.PRNGKey(0)
@@ -192,15 +205,15 @@ def run_bptt_batch(
         _dropout_masks = tuple(
             jax.random.bernoulli(
                 jax.random.fold_in(key, 0xD20 + i),
-                1.0 - p, shape=(batch_size, dim),
+                1.0 - p,
+                shape=(batch_size, dim),
             ).astype(jnp.float32)
-            if p > 0.0 else jnp.ones((batch_size, dim), dtype=jnp.float32)
-            for i, (p, dim) in enumerate(zip(dropout_probs, layer_dims))
+            if p > 0.0
+            else jnp.ones((batch_size, dim), dtype=jnp.float32)
+            for i, (p, dim) in enumerate(zip(dropout_probs, layer_dims, strict=False))
         )
     else:
-        _dropout_masks = tuple(
-            jnp.ones((batch_size, dim), dtype=jnp.float32) for dim in layer_dims
-        )
+        _dropout_masks = tuple(jnp.ones((batch_size, dim), dtype=jnp.float32) for dim in layer_dims)
 
     n_layers = len(layer_dims)
     values_init_list = [jnp.zeros((batch_size, dim)) for dim in layer_dims]
@@ -224,22 +237,24 @@ def run_bptt_batch(
             T = data.shape[1]
             if n_timesteps == 1:
                 n_timesteps = T
-            elif T != n_timesteps:
+            elif n_timesteps != T:
                 raise ValueError(
-                    f"Inconsistent temporal dimensions: expected {n_timesteps}, got {T}")
+                    f"Inconsistent temporal dimensions: expected {n_timesteps}, got {T}"
+                )
     if n_timesteps > 1:
         if n_timesteps > n_iterations:
-            raise ValueError(
-                f"n_timesteps ({n_timesteps}) exceeds n_iterations ({n_iterations})")
+            raise ValueError(f"n_timesteps ({n_timesteps}) exceeds n_iterations ({n_iterations})")
         if n_iterations % n_timesteps != 0:
             raise ValueError(
                 f"n_iterations ({n_iterations}) is not an integer multiple of "
-                f"n_timesteps ({n_timesteps})")
+                f"n_timesteps ({n_timesteps})"
+            )
     iters_per_timestep = max(n_iterations, 1) // n_timesteps
 
     _has_ts_gated_value_pm = any(
-        getattr(s, 'advance_timestep', False)
-        for _, s in tuple(project_conns_value) + tuple(modulate_conns_value))
+        getattr(s, "advance_timestep", False)
+        for _, s in tuple(project_conns_value) + tuple(modulate_conns_value)
+    )
 
     def _timestep_boundary(iter_idx):
         if not _has_ts_gated_value_pm:
@@ -261,21 +276,31 @@ def run_bptt_batch(
 
     hist_init = tuple(
         jnp.zeros((depth + 1, batch_size, _hist_buf_dim(nt, node_id)))
-        for (node_id, depth), nt in zip(_hist_specs, _hist_node_types)
+        for (node_id, depth), nt in zip(_hist_specs, _hist_node_types, strict=False)
     )
 
     _n_predict = len(predict_conns)
     errors_consumed = any(nt == 1 for nt in _hist_node_types)
     precisions_consumed = any(nt == 2 for nt in _hist_node_types)
     if errors_consumed:
-        _emap = {node_id: k for k, ((node_id, _d), nt)
-                 in enumerate(zip(_hist_specs, _hist_node_types)) if nt == 1}
+        _emap = {
+            node_id: k
+            for k, ((node_id, _d), nt) in enumerate(
+                zip(_hist_specs, _hist_node_types, strict=False)
+            )
+            if nt == 1
+        }
         err_buf_idx = tuple(_emap[i] for i in range(_n_predict))
     else:
         err_buf_idx = ()
     if precisions_consumed:
-        _pmap = {node_id: k for k, ((node_id, _d), nt)
-                 in enumerate(zip(_hist_specs, _hist_node_types)) if nt == 2}
+        _pmap = {
+            node_id: k
+            for k, ((node_id, _d), nt) in enumerate(
+                zip(_hist_specs, _hist_node_types, strict=False)
+            )
+            if nt == 2
+        }
         prec_buf_idx = tuple(_pmap[i] for i in range(_n_predict))
     else:
         prec_buf_idx = ()
@@ -292,8 +317,7 @@ def run_bptt_batch(
                 tick = global_iter // iters_per_timestep
                 push = ((global_iter % iters_per_timestep) == 0) & (global_iter > 0)
                 slot = (tick - 1) % S
-                new[k] = jnp.where(
-                    push, hist[k].at[slot].set(values[node_id]), hist[k])
+                new[k] = jnp.where(push, hist[k].at[slot].set(values[node_id]), hist[k])
             else:
                 new[k] = hist[k].at[global_iter % S].set(values[node_id])
         return tuple(new)
@@ -302,9 +326,9 @@ def run_bptt_batch(
         if not buf_idx_map:
             return ()
         return tuple(
-            _read_delayed(hist, buf_idx_map[i], 1, False,
-                          tick_base, iter_idx, iters_per_timestep)
-            for i in range(len(buf_idx_map)))
+            _read_delayed(hist, buf_idx_map[i], 1, False, tick_base, iter_idx, iters_per_timestep)
+            for i in range(len(buf_idx_map))
+        )
 
     def _write_hist_ep(hist, err_arrays, prec_arrays, global_iter):
         if not err_buf_idx and not prec_buf_idx:
@@ -331,7 +355,9 @@ def run_bptt_batch(
                 data = data[:, None, :]
             temporal_clamp_list[layer_idx] = data
             values_init_list[layer_idx] = data[:, 0, :]
-            clamped_list[layer_idx] = jnp.ones((batch_size, layer_dims[layer_idx]), dtype=jnp.float32)
+            clamped_list[layer_idx] = jnp.ones(
+                (batch_size, layer_dims[layer_idx]), dtype=jnp.float32
+            )
         else:
             data_key, mask_key = sample_key_or_pair
             data = sample[data_key]
@@ -342,10 +368,13 @@ def run_bptt_batch(
             clamped_list[layer_idx] = mask
             mask_t0 = mask[:, 0, :] if mask.ndim == 3 else mask
             values_init_list[layer_idx] = _apply_mask(
-                mask_t0, data[:, 0, :], values_init_list[layer_idx])
+                mask_t0, data[:, 0, :], values_init_list[layer_idx]
+            )
     temporal_clamp_values = tuple(temporal_clamp_list)
     clamped = tuple(
-        c if c.ndim == 3 else jnp.broadcast_to(c[:, None, :], (batch_size, n_timesteps, c.shape[-1]))
+        c
+        if c.ndim == 3
+        else jnp.broadcast_to(c[:, None, :], (batch_size, n_timesteps, c.shape[-1]))
         for c in clamped_list
     )
     clamped_t0 = tuple(c[:, 0, :] for c in clamped)
@@ -357,48 +386,63 @@ def run_bptt_batch(
     _values_optimizer = values_optimizer if values_optimizer is not None else optax.sgd(1.0)
     if values_opt_state is None:
         values_opt_state = _values_optimizer.init(
-            tuple(jnp.zeros((batch_size, dim)) for dim in layer_dims))
+            tuple(jnp.zeros((batch_size, dim)) for dim in layer_dims)
+        )
 
     trainable = {
-        'predict_weights': tuple(learnable_leaf(w) for w in predict_weights),
-        'predict_biases': predict_biases,
-        'precision_weights': precision_weights,
-        'precision_biases': precision_biases,
+        "predict_weights": tuple(learnable_leaf(w) for w in predict_weights),
+        "predict_biases": predict_biases,
+        "precision_weights": precision_weights,
+        "precision_biases": precision_biases,
     }
 
     _needs_prec_carry_init = any(
-        2 in c.precision_input_node_types for c in predict_conns
-        if c.precision_input_node_types)
+        2 in c.precision_input_node_types for c in predict_conns if c.precision_input_node_types
+    )
 
     def unroll(trainable_params):
-        pw = tuple(rebuild_weight(o, l)
-                   for o, l in zip(predict_weights, trainable_params['predict_weights']))
-        pb = trainable_params['predict_biases']
-        ppw = trainable_params['precision_weights']
-        ppb = trainable_params['precision_biases']
+        pw = tuple(
+            rebuild_weight(o, l)
+            for o, l in zip(predict_weights, trainable_params["predict_weights"], strict=False)
+        )
+        pb = trainable_params["predict_biases"]
+        ppw = trainable_params["precision_weights"]
+        ppb = trainable_params["precision_biases"]
         if not update_precision:
             ppw = tuple(lax.stop_gradient(w) for w in ppw)
             ppb = tuple(lax.stop_gradient(b) for b in ppb)
 
         if _needs_prec_carry_init:
             precisions_carry_init = tuple(
-                jnp.broadcast_to(conn.precision_transform(b)[None, :],
-                                 (batch_size, b.shape[0]))
-                for conn, b in zip(predict_conns, ppb))
+                jnp.broadcast_to(conn.precision_transform(b)[None, :], (batch_size, b.shape[0]))
+                for conn, b in zip(predict_conns, ppb, strict=False)
+            )
         else:
             precisions_carry_init = ()
 
         # Initial forward pass — inside the differentiated function so the
         # feedforward init is part of the trajectory the gradient sees.
         values, errors, precisions = _single_pass(
-            values_init, errors_init, clamped_t0,
-            pw, pb,
-            project_weights, project_biases,
-            modulate_weights, modulate_biases,
-            ppw, ppb,
-            predict_conns, project_conns, modulate_conns,
-            activation_fns, project_conns_value, modulate_conns_value,
-            is_poisson_types, key, is_stochastic,
+            values_init,
+            errors_init,
+            clamped_t0,
+            pw,
+            pb,
+            project_weights,
+            project_biases,
+            modulate_weights,
+            modulate_biases,
+            ppw,
+            ppb,
+            predict_conns,
+            project_conns,
+            modulate_conns,
+            activation_fns,
+            project_conns_value,
+            modulate_conns_value,
+            is_poisson_types,
+            key,
+            is_stochastic,
             predict_error_activations=predict_error_activations,
             predict_precision_activations=predict_precision_activations,
             layer_activations=_layer_acts,
@@ -427,12 +471,13 @@ def run_bptt_batch(
             if truncation is not None:
                 if truncation == 0:
                     values, vos, hist = jax.tree_util.tree_map(
-                        lax.stop_gradient, (values, vos, hist))
+                        lax.stop_gradient, (values, vos, hist)
+                    )
                 else:
                     cut = (i % truncation == 0) & (i > 0)
                     values, vos, hist = jax.tree_util.tree_map(
-                        lambda x: jnp.where(cut, lax.stop_gradient(x), x),
-                        (values, vos, hist))
+                        lambda x: jnp.where(cut, lax.stop_gradient(x), x), (values, vos, hist)
+                    )
 
             t = i // iters_per_timestep
             clamped_t = tuple(c[:, t, :] for c in clamped)
@@ -441,8 +486,7 @@ def run_bptt_batch(
                 for j in range(n_layers)
             )
             values = tuple(
-                jnp.where(clamped_t[j] > 0.5, values[j],
-                          values[j] * _dropout_masks[j])
+                jnp.where(clamped_t[j] > 0.5, values[j], values[j] * _dropout_masks[j])
                 for j in range(n_layers)
             )
             hist = _write_hist(hist, values, i)
@@ -453,17 +497,32 @@ def run_bptt_batch(
             is_boundary = _timestep_boundary(i)
 
             new_values, pre_errors, pre_precisions, energy, new_vos = _inference_step(
-                values, errors, clamped_t,
-                pw, pb,
-                project_weights, project_biases,
-                modulate_weights, modulate_biases,
-                ppw, ppb,
+                values,
+                errors,
+                clamped_t,
+                pw,
+                pb,
+                project_weights,
+                project_biases,
+                modulate_weights,
+                modulate_biases,
+                ppw,
+                ppb,
                 predict_conns,
-                project_conns_internal, project_conns_value,
-                modulate_conns_internal, modulate_conns_value,
-                activation_fns, _values_optimizer, vos, is_poisson_types, iter_key,
+                project_conns_internal,
+                project_conns_value,
+                modulate_conns_internal,
+                modulate_conns_value,
+                activation_fns,
+                _values_optimizer,
+                vos,
+                is_poisson_types,
+                iter_key,
                 is_stochastic,
-                spatial_layers, spatial_neighborhoods, inference_regs, labels,
+                spatial_layers,
+                spatial_neighborhoods,
+                inference_regs,
+                labels,
                 project_conns_precision=project_conns_precision,
                 modulate_conns_precision=modulate_conns_precision,
                 modulate_conns_flow_pre=modulate_conns_flow_pre,
@@ -476,12 +535,13 @@ def run_bptt_batch(
                 precisions=precisions,
                 layer_activations=_layer_acts,
                 is_boundary=is_boundary,
-                hist=hist, tick_base=0, iter_idx=i,
+                hist=hist,
+                tick_base=0,
+                iter_idx=i,
                 iters_per_timestep=iters_per_timestep,
             )
             new_values = tuple(
-                jnp.where(clamped_t[j] > 0.5, new_values[j],
-                          new_values[j] * _dropout_masks[j])
+                jnp.where(clamped_t[j] > 0.5, new_values[j], new_values[j] * _dropout_masks[j])
                 for j in range(n_layers)
             )
             hist = _write_hist_ep(hist, pre_errors, pre_precisions, i)
@@ -489,7 +549,7 @@ def run_bptt_batch(
             # Per-step energy is _inference_step's batch-SUM; log/loss use the
             # batch-mean scale of _compute_energy.
             energy_mean = energy / batch_size
-            if loss_mode == 'objective_sum':
+            if loss_mode == "objective_sum":
                 is_ts_end = ((i + 1) % iters_per_timestep) == 0
                 obj = objective_fn(new_values, sample, t)
                 ys = (energy_mean, jnp.where(is_ts_end, obj, 0.0))
@@ -499,9 +559,10 @@ def run_bptt_batch(
 
         step = jax.checkpoint(body) if remat else body
         (values, new_vos, hist), ys = lax.scan(
-            step, (values, values_opt_state, hist), jnp.arange(n_iterations))
+            step, (values, values_opt_state, hist), jnp.arange(n_iterations)
+        )
 
-        if loss_mode == 'objective_sum':
+        if loss_mode == "objective_sum":
             step_energies, step_objs = ys
         else:
             step_energies = ys
@@ -519,49 +580,66 @@ def run_bptt_batch(
         prev_p = _reconstruct_ep(hist, prec_buf_idx, n_iterations, 0)
         final_key = jax.random.fold_in(key, n_iterations)
         final_errors, final_precisions = _recompute_errors_precisions(
-            values, predict_conns, pw, pb, ppw, ppb, activation_fns,
+            values,
+            predict_conns,
+            pw,
+            pb,
+            ppw,
+            ppb,
+            activation_fns,
             predict_error_activations=predict_error_activations,
             prev_errors=prev_e,
             predict_precision_activations=predict_precision_activations,
             prev_precisions=prev_p,
-            project_weights=project_weights, modulate_weights=modulate_weights,
-            project_biases=project_biases, modulate_biases=modulate_biases,
+            project_weights=project_weights,
+            modulate_weights=modulate_weights,
+            project_biases=project_biases,
+            modulate_biases=modulate_biases,
             project_conns_precision=project_conns_precision,
             modulate_conns_precision=modulate_conns_precision,
             project_conns_internal=project_conns_internal,
             modulate_conns_internal=modulate_conns_internal,
-            is_stochastic=is_stochastic, key=final_key,
-            hist=hist, tick_base=n_iterations, iter_idx=0,
-            iters_per_timestep=iters_per_timestep)
-        final_energy = _compute_energy(
-            final_errors, final_precisions, predict_pre_scales)
+            is_stochastic=is_stochastic,
+            key=final_key,
+            hist=hist,
+            tick_base=n_iterations,
+            iter_idx=0,
+            iters_per_timestep=iters_per_timestep,
+        )
+        final_energy = _compute_energy(final_errors, final_precisions, predict_pre_scales)
 
-        if loss_mode == 'energy_final':
+        if loss_mode == "energy_final":
             loss = final_energy
-        elif loss_mode == 'energy_sum':
+        elif loss_mode == "energy_sum":
             loss = (jnp.sum(step_energies) + final_energy) / (n_iterations + 1)
-        elif loss_mode == 'objective':
+        elif loss_mode == "objective":
             loss = objective_fn(values, sample, n_timesteps - 1)
         else:  # objective_sum
             loss = jnp.sum(step_objs) / n_timesteps
 
-        aux = (step_energies, final_energy, values,
-               final_errors, final_precisions, new_vos)
+        aux = (step_energies, final_energy, values, final_errors, final_precisions, new_vos)
         return loss, aux
 
     (loss, aux), grads = jax.value_and_grad(unroll, has_aux=True)(trainable)
-    (step_energies, final_energy, final_values,
-     final_errors, final_precisions, new_values_opt_state) = aux
+    (
+        step_energies,
+        final_energy,
+        final_values,
+        final_errors,
+        final_precisions,
+        new_values_opt_state,
+    ) = aux
 
     _params_optimizer = params_optimizer if params_optimizer is not None else optax.adam(1e-4)
     if params_opt_state is None:
         params_opt_state = _params_optimizer.init(trainable)
-    updates, new_params_opt_state = _params_optimizer.update(
-        grads, params_opt_state, trainable)
+    updates, new_params_opt_state = _params_optimizer.update(grads, params_opt_state, trainable)
     new_trainable = optax.apply_updates(trainable, updates)
 
-    new_pw = [rebuild_weight(o, l)
-              for o, l in zip(predict_weights, new_trainable['predict_weights'])]
+    new_pw = [
+        rebuild_weight(o, l)
+        for o, l in zip(predict_weights, new_trainable["predict_weights"], strict=False)
+    ]
     if predict_weight_masks:
         for i, conn in enumerate(predict_conns):
             if conn.is_masked and not conn.is_sparse:
@@ -569,13 +647,13 @@ def run_bptt_batch(
 
     new_params = NetworkParams(
         predict_weights=new_pw,
-        predict_biases=list(new_trainable['predict_biases']),
+        predict_biases=list(new_trainable["predict_biases"]),
         project_weights=list(project_weights),
         project_biases=list(project_biases),
         modulate_weights=list(modulate_weights),
         modulate_biases=list(modulate_biases),
-        precision_weights=list(new_trainable['precision_weights']),
-        precision_biases=list(new_trainable['precision_biases']),
+        precision_weights=list(new_trainable["precision_weights"]),
+        precision_biases=list(new_trainable["precision_biases"]),
     )
 
     values_log = tuple(v[None] for v in final_values)
@@ -584,5 +662,14 @@ def run_bptt_batch(
     deltas_log = tuple(d[None] for d in _compute_deltas(final_errors, final_precisions))
     energies = jnp.concatenate([step_energies, jnp.atleast_1d(final_energy)])
 
-    return (new_params, new_params_opt_state, new_values_opt_state,
-            values_log, errors_log, precisions_log, deltas_log, energies, loss)
+    return (
+        new_params,
+        new_params_opt_state,
+        new_values_opt_state,
+        values_log,
+        errors_log,
+        precisions_log,
+        deltas_log,
+        energies,
+        loss,
+    )
