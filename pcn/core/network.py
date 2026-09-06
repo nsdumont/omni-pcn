@@ -1,34 +1,33 @@
-"""PCNetwork class - the main class for defining predictive coding networks.
+"""
+PCNetwork class - the main class for defining predictive coding networks.
 
 Provides a context manager for network definition and compiles to JAX-friendly
 structures for efficient execution.
 """
 
-from datetime import UTC
+from typing import Any, Dict, List, Optional, Tuple, Union
 from pathlib import Path
-from typing import Any, Optional
-
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..config import DEFAULTS, validate_keys
-from .activations import Poisson, activation_from_name
-from .connections import (
-    Modulate,
-    Predict,
-    Project,
-    _resolve_owner_idx,
-)
-from .layer import Layer, NodeRef
 from .state import NetworkParams
 from .structure import (
-    LayerSpec,
-    ModulateConnSpec,
     NetworkStructure,
+    LayerSpec,
     PredictConnSpec,
     ProjectConnSpec,
+    ModulateConnSpec,
 )
+from .layer import Layer, NodeRef
+from .connections import (
+    Predict, PredictRes, PredictConv, PredictTransConv, Project, Modulate,
+    _resolve_owner_idx,
+)
+from ..config import DEFAULTS, load_config, _DEFAULT, validate_keys
+from .activations import activation_from_name, Activation, Poisson
+from . import sparse as _sparse
+from .sparse import SparseWeight, resolve_sparse_mode, indices_to_dense_mask
 
 
 def _make_band_mask(m, n, n_bands):
@@ -46,20 +45,21 @@ def _make_band_mask(m, n, n_bands):
 _UNSET = object()
 
 # Module-level context for the current network being defined
-_current_network: Optional["PCNetwork"] = None
+_current_network: Optional['PCNetwork'] = None
 
 
-def _get_current_network() -> "PCNetwork":
+def _get_current_network() -> 'PCNetwork':
     """Get the currently active PCNetwork context."""
     global _current_network
     if _current_network is None:
         raise RuntimeError(
-            "No PCNetwork context active. Create layers and connections inside a 'with net:' block."
+            "No PCNetwork context active. "
+            "Create layers and connections inside a 'with net:' block."
         )
     return _current_network
 
 
-def _set_current_network(net: Optional["PCNetwork"]) -> None:
+def _set_current_network(net: Optional['PCNetwork']) -> None:
     """Set the current network context."""
     global _current_network
     _current_network = net
@@ -72,7 +72,8 @@ def _clear_current_network() -> None:
 
 
 class PCNetwork:
-    """A predictive coding network defined as a graph of layers and connections.
+    """
+    A predictive coding network defined as a graph of layers and connections.
 
     Usage:
         net = PCNetwork(seed=0)
@@ -91,7 +92,6 @@ class PCNetwork:
         node_to_idx: Map node labels to (index, node_type)
         structure: NetworkStructure - compiled static structure (after build)
         params: NetworkParams - learnable parameters (after build)
-
     """
 
     def __init__(self, seed: int = 0):
@@ -101,18 +101,18 @@ class PCNetwork:
         self.rng, self.sim_rng = jax.random.split(jax.random.PRNGKey(seed))
 
         # Defaults: start from JSON defaults, overridden by config()
-        self._defaults: dict = dict(DEFAULTS["model"])
+        self._defaults: Dict = dict(DEFAULTS["model"])
 
         # Populated during context manager
-        self._layers: list[Layer] = []
-        self._predict_conns: list[Predict] = []
-        self._project_conns: list[Project] = []
-        self._modulate_conns: list[Modulate] = []
+        self._layers: List[Layer] = []
+        self._predict_conns: List[Predict] = []
+        self._project_conns: List[Project] = []
+        self._modulate_conns: List[Modulate] = []
         self._structural_attention_groups: list = []
 
         # Populated during build()
-        self.structure: NetworkStructure | None = None
-        self.params: NetworkParams | None = None
+        self.structure: Optional[NetworkStructure] = None
+        self.params: Optional[NetworkParams] = None
         # Custom weight masks for transformation='masked' (one entry per conn
         # of each type; entries for non-masked conns are dummy scalars).
         self.predict_weight_masks: tuple = ()
@@ -131,12 +131,13 @@ class PCNetwork:
         self.layer_activations: tuple = ()
 
         # Label mappings (populated during build)
-        self.label_to_idx: dict[str, int] = {}
-        self.idx_to_label: dict[int, str] = {}
-        self.node_to_idx: dict[str, tuple[int, str]] = {}
+        self.label_to_idx: Dict[str, int] = {}
+        self.idx_to_label: Dict[int, str] = {}
+        self.node_to_idx: Dict[str, Tuple[int, str]] = {}
 
-    def config(self, config_file=None, **kwargs) -> "PCNetwork":
-        """Set default values for layers and connections.
+    def config(self, config_file=None, **kwargs) -> 'PCNetwork':
+        """
+        Set default values for layers and connections.
 
         Call before the ``with net:`` block to override built-in defaults.
         Values are resolved in order: explicit kwargs > config_file > default_config.json.
@@ -175,50 +176,48 @@ class PCNetwork:
                 l1 = Layer(dim=784, label="input")
                 l2 = Layer(dim=256, label="hidden")
                 Predict(l1, l2)
-
         """
-        validate_keys("model", kwargs)
+        validate_keys('model', kwargs)
 
         if config_file is not None:
             # Load the user's file directly (without merging with DEFAULTS)
             # so we can apply BC conversion on the keys the user actually set.
             import json as _json
-
             with open(config_file) as _f:
                 user_cfg = _json.load(_f)
             model_cfg = dict(user_cfg.get("model", {}))
-            validate_keys("model", model_cfg)
+            validate_keys('model', model_cfg)
             # Back-compat: legacy key ``init_log_precision`` is converted to
             # ``init_precision`` (unless the file already sets init_precision).
-            if "init_log_precision" in model_cfg and "init_precision" not in model_cfg:
-                model_cfg["init_precision"] = float(np.exp(model_cfg.pop("init_log_precision")))
+            if 'init_log_precision' in model_cfg and 'init_precision' not in model_cfg:
+                model_cfg['init_precision'] = float(np.exp(model_cfg.pop('init_log_precision')))
             else:
-                model_cfg.pop("init_log_precision", None)
+                model_cfg.pop('init_log_precision', None)
             self._defaults.update(model_cfg)
 
         # Convert string activation to Activation instance
-        if "activation" in kwargs and isinstance(kwargs["activation"], str):
-            kwargs["activation"] = activation_from_name(kwargs["activation"])
+        if 'activation' in kwargs and isinstance(kwargs['activation'], str):
+            kwargs['activation'] = activation_from_name(kwargs['activation'])
 
         # Back-compat: accept ``init_log_precision`` kwarg and convert.
-        if "init_log_precision" in kwargs and "init_precision" not in kwargs:
-            kwargs["init_precision"] = float(np.exp(kwargs.pop("init_log_precision")))
+        if 'init_log_precision' in kwargs and 'init_precision' not in kwargs:
+            kwargs['init_precision'] = float(np.exp(kwargs.pop('init_log_precision')))
         else:
-            kwargs.pop("init_log_precision", None)
+            kwargs.pop('init_log_precision', None)
 
         # Expand learn_precision shorthand to both individual flags if neither
         # is already explicitly provided in kwargs.
-        if "learn_precision" in kwargs:
-            lp = kwargs.pop("learn_precision")
-            kwargs.setdefault("learn_precision_weights", lp)
-            kwargs.setdefault("learn_precision_bias", lp)
+        if 'learn_precision' in kwargs:
+            lp = kwargs.pop('learn_precision')
+            kwargs.setdefault('learn_precision_weights', lp)
+            kwargs.setdefault('learn_precision_bias', lp)
 
         self._defaults.update(kwargs)
 
         # Also convert activation if it came from config_file as a string
-        act = self._defaults.get("activation")
+        act = self._defaults.get('activation')
         if isinstance(act, str):
-            self._defaults["activation"] = activation_from_name(act)
+            self._defaults['activation'] = activation_from_name(act)
 
         return self
 
@@ -231,14 +230,13 @@ class PCNetwork:
         Args:
             predict_conns: List of Predict connections to compete.
             temperature: Softmax temperature (lower = sharper selection).
-
         """
         from .structure import StructuralAttentionGroup
-
         indices = tuple(p._idx for p in predict_conns)
-        self._structural_attention_groups.append(StructuralAttentionGroup(indices, temperature))
+        self._structural_attention_groups.append(
+            StructuralAttentionGroup(indices, temperature))
 
-    def __enter__(self) -> "PCNetwork":
+    def __enter__(self) -> 'PCNetwork':
         """Enter the network definition context."""
         _set_current_network(self)
         return self
@@ -248,7 +246,8 @@ class PCNetwork:
         _clear_current_network()
 
     def __getitem__(self, label: str) -> int:
-        """Get layer index by label.
+        """
+        Get layer index by label.
 
         Example: net['hidden'] -> 1
         """
@@ -260,7 +259,7 @@ class PCNetwork:
 
         # Auto-generate label if not provided
         if layer.label is None:
-            layer.label = f"layer_d{layer.dim}_{idx}"
+            layer.label = f'layer_d{layer.dim}_{idx}'
 
         self._layers.append(layer)
         layer._idx = idx
@@ -286,8 +285,9 @@ class PCNetwork:
         conn.post_layer_idx = conn.post.owner._idx
         self._modulate_conns.append(conn)
 
-    def build(self, weight_initialization="xavier") -> "PCNetwork":
-        """Compile the network into JAX-friendly structures.
+    def build(self, weight_initialization='xavier') -> 'PCNetwork':
+        """
+        Compile the network into JAX-friendly structures.
 
         This method:
         1. Builds label-to-index mappings
@@ -297,14 +297,13 @@ class PCNetwork:
 
         Returns:
             self for method chaining
-
         """
         # Assign and deduplicate labels
         self._all_conns = self._predict_conns + self._project_conns + self._modulate_conns
         self._resolve_labels()
 
-        # Sort first: connection-owned NodeRefs use ``owner._idx``, so every
-        # mapping and cross-connection reference must see the final order.
+        # Connection-owned NodeRefs use ``owner._idx``. Sort and re-index before
+        # constructing any mappings or resolving cross-connection references.
         self._sort_connections()
         self._all_conns = self._predict_conns + self._project_conns + self._modulate_conns
 
@@ -312,12 +311,15 @@ class PCNetwork:
         for idx, layer in enumerate(self._layers):
             self.label_to_idx[layer.label] = idx
             self.idx_to_label[idx] = layer.label
-            self.node_to_idx[f"{layer.label}-value"] = (idx, "value")
+            self.node_to_idx[f'{layer.label}-value'] = (idx, 'value')
 
         # Build label mappings for predict connection error/precision nodes
         for idx, conn in enumerate(self._predict_conns):
-            self.node_to_idx[f"{conn.label}-error"] = (idx, "error")
-            self.node_to_idx[f"{conn.label}-logprecision"] = (idx, "log_precision")
+            self.node_to_idx[f'{conn.label}-error'] = (idx, 'error')
+            self.node_to_idx[f'{conn.label}-logprecision'] = (idx, 'log_precision')
+
+        # Resolve sparse=True/'auto' per connection (needs the platform)
+        self._resolve_sparse()
 
         # Build structure
         self.structure = self._build_structure()
@@ -332,11 +334,10 @@ class PCNetwork:
 
     def _sort_connections(self) -> None:
         """Sort connections by order parameter, defaulting by type."""
-
         def sort_key(conn, type_priority, default_idx):
             if conn.order is not None:
                 return (conn.order, type_priority, default_idx)
-            return (float("inf"), type_priority, default_idx)
+            return (float('inf'), type_priority, default_idx)
 
         # Assign default indices
         for i, c in enumerate(self._predict_conns):
@@ -351,10 +352,9 @@ class PCNetwork:
         self._project_conns.sort(key=lambda c: sort_key(c, 1, c._default_order))
         self._modulate_conns.sort(key=lambda c: sort_key(c, 2, c._default_order))
 
-        # Re-index after sorting. Structural-attention groups were registered
-        # while connections still had definition-order indices, so translate
-        # those indices before replacing them.
-        old_to_new_predict = {conn._idx: idx for idx, conn in enumerate(self._predict_conns)}
+        old_to_new_predict = {
+            conn._idx: idx for idx, conn in enumerate(self._predict_conns)
+        }
         if self._structural_attention_groups:
             from .structure import StructuralAttentionGroup
 
@@ -378,7 +378,7 @@ class PCNetwork:
         # Deduplicate layer labels
         layer_labels = [l.label for l in self._layers]
         unique_layer_labels = self._make_unique(layer_labels)
-        for layer, label in zip(self._layers, unique_layer_labels, strict=False):
+        for layer, label in zip(self._layers, unique_layer_labels):
             layer.label = label
 
         # Auto-generate connection labels where not user-specified
@@ -387,7 +387,7 @@ class PCNetwork:
                 if len(conn.pre) == 1:
                     pre_label = conn.pre[0].label or f"layer_{conn.pre[0]._idx}"
                 else:
-                    pre_label = "+".join(p.label or f"layer_{p._idx}" for p in conn.pre)
+                    pre_label = '+'.join(p.label or f"layer_{p._idx}" for p in conn.pre)
                 post_label = conn.post.label or f"layer_{conn.post._idx}"
                 conn.label = f"predict_{pre_label}_{post_label}"
         for conn in self._project_conns:
@@ -395,24 +395,24 @@ class PCNetwork:
                 pre_label = conn._pre_list[0].node_type
                 post_label = conn.post.node_type
                 if conn.update_rule is not None:
-                    gd = "gd_" if conn.update_rule.type_id == 2 else ""
+                    gd = 'gd_' if conn.update_rule.type_id == 2 else ''
                 else:
-                    gd = ""
+                    gd = ''
                 conn.label = f"{gd}project_{pre_label}_{post_label}"
         for conn in self._modulate_conns:
             if conn.label is None:
                 pre_label = conn._pre_list[0].node_type
                 post_label = conn.post.node_type
                 if conn.update_rule is not None:
-                    gd = "gd_" if conn.update_rule.type_id == 2 else ""
+                    gd = 'gd_' if conn.update_rule.type_id == 2 else ''
                 else:
-                    gd = ""
+                    gd = ''
                 conn.label = f"{gd}modulate_{pre_label}_{post_label}"
 
         # Deduplicate connection labels
-        conn_labels = [c.label for c in self._all_conns]
+        conn_labels = [c.label for c in self._all_conns] 
         unique_conn_labels = self._make_unique(conn_labels)
-        for conn, label in zip(self._all_conns, unique_conn_labels, strict=False):
+        for conn, label in zip(self._all_conns, unique_conn_labels):
             conn.label = label
 
     @staticmethod
@@ -439,14 +439,14 @@ class PCNetwork:
         str      -> str  (sample dict key, resolved at runtime)
         tuple    -> tuple of resolved elements
         """
-
         def _resolve_one(elem):
             if isinstance(elem, NodeRef):
                 return (elem.node_type_id, elem.owner._idx)
             elif isinstance(elem, str):
                 return elem
             else:
-                raise TypeError(f"loss_fn inputs must be NodeRef or str, got {type(elem)}")
+                raise TypeError(
+                    f"loss_fn inputs must be NodeRef or str, got {type(elem)}")
 
         if isinstance(inputs_spec, (NodeRef, str)):
             return _resolve_one(inputs_spec)
@@ -454,11 +454,20 @@ class PCNetwork:
             return tuple(_resolve_one(e) for e in inputs_spec)
         else:
             raise TypeError(
-                f"loss_fn inputs must be NodeRef, str, or tuple thereof, got {type(inputs_spec)}"
-            )
+                f"loss_fn inputs must be NodeRef, str, or tuple thereof, "
+                f"got {type(inputs_spec)}")
 
     def _build_structure(self) -> NetworkStructure:
         """Create the static NetworkStructure."""
+        def _activation_thresholds(layer):
+            thr = tuple(
+                float(t) for t in getattr(layer.activation, 'thresholds', ()))
+            if thr and len(thr) not in (1, layer.dim):
+                raise ValueError(
+                    f"Layer '{layer.label}': activation thresholds length "
+                    f"{len(thr)} must be 1 (shared) or match dim {layer.dim}")
+            return thr
+
         layer_specs = tuple(
             LayerSpec(
                 dim=layer.dim,
@@ -467,9 +476,10 @@ class PCNetwork:
                 label=layer.label,
                 is_poisson=isinstance(layer.activation, Poisson),
                 spatial_structure=layer.spatial_structure,
-                dropout_prob=getattr(layer, "dropout_prob", 0.0),
-                activation_temperature=float(getattr(layer.activation, "temperature", 1.0)),
-                activation_num_winners=int(getattr(layer.activation, "num_winners", 0)),
+                dropout_prob=getattr(layer, 'dropout_prob', 0.0),
+                activation_temperature=float(getattr(layer.activation, 'temperature', 1.0)),
+                activation_num_winners=int(getattr(layer.activation, 'num_winners', 0)),
+                activation_thresholds=_activation_thresholds(layer),
             )
             for layer in self._layers
         )
@@ -483,8 +493,8 @@ class PCNetwork:
             for r in refs:
                 if r.owner._idx is None:
                     raise ValueError(
-                        f"precision_input source {r!r} is not registered in this network"
-                    )
+                        f"precision_input source {r!r} is not registered in "
+                        f"this network")
                 idxs.append(r.owner._idx)
                 ntypes.append(r.node_type_id)
                 slices.append(r.slice_bounds)
@@ -497,20 +507,19 @@ class PCNetwork:
         # precision activation, and no precision-targeting Project/Modulate
         # anywhere in the graph.
         _has_prec_routing = any(
-            getattr(c, "post_node_type", 0) == 2
-            for c in (self._project_conns + self._modulate_conns)
-        )
+            getattr(c, 'post_node_type', 0) == 2
+            for c in (self._project_conns + self._modulate_conns))
 
         def _is_unit_precision(conn):
-            pact = getattr(conn, "precision_activation", None)
+            pact = getattr(conn, 'precision_activation', None)
             return (
                 not conn.learn_precision_weights
                 and not conn.learn_precision_bias
-                and float(getattr(conn, "init_precision", 1.0)) == 1.0
-                and getattr(conn, "init_precision_weights", None) is None
+                and float(getattr(conn, 'init_precision', 1.0)) == 1.0
+                and getattr(conn, 'init_precision_weights', None) is None
                 and not _has_prec_routing
-                and not getattr(pact, "has_memory", False)
-                and not getattr(pact, "needs_key", False)
+                and not getattr(pact, 'has_memory', False)
+                and not getattr(pact, 'needs_key', False)
             )
 
         def _predict_spec(conn):
@@ -520,49 +529,50 @@ class PCNetwork:
                 post_idx=conn.post._idx,
                 has_fixed_weights=(
                     (conn.weight is not None)
-                    if getattr(conn, "learn_weights", None) is None
-                    else (not conn.learn_weights)
-                ),
+                    if getattr(conn, 'learn_weights', None) is None
+                    else (not conn.learn_weights)),
                 learn_precision_weights=conn.learn_precision_weights,
                 learn_precision_bias=conn.learn_precision_bias,
                 alpha=conn.alpha,
-                is_conv=getattr(conn, "is_conv", False),
-                is_transconv=getattr(conn, "is_transconv", False),
-                in_channels=getattr(conn, "in_channels", 0),
-                out_channels=getattr(conn, "out_channels", 0),
-                kernel_size=getattr(conn, "kernel_size", ()),
-                stride=getattr(conn, "stride", (1, 1)),
-                padding=getattr(conn, "padding", "SAME"),
-                input_spatial=getattr(conn, "input_shape", ()),
-                output_spatial=getattr(conn, "output_shape", ()),
-                pool_type=getattr(conn, "pool_type", 0),
-                pool_size=getattr(conn, "pool_size", ()),
-                pool_stride=getattr(conn, "pool_stride", ()),
-                has_bias=getattr(conn, "use_bias", True),
-                is_res=getattr(conn, "is_res", False),
-                label=conn.label or "",
-                n_bands=getattr(conn, "n_bands", 0),
+                is_conv=getattr(conn, 'is_conv', False),
+                is_transconv=getattr(conn, 'is_transconv', False),
+                in_channels=getattr(conn, 'in_channels', 0),
+                out_channels=getattr(conn, 'out_channels', 0),
+                kernel_size=getattr(conn, 'kernel_size', ()),
+                stride=getattr(conn, 'stride', (1, 1)),
+                padding=getattr(conn, 'padding', 'SAME'),
+                input_spatial=getattr(conn, 'input_shape', ()),
+                output_spatial=getattr(conn, 'output_shape', ()),
+                pool_type=getattr(conn, 'pool_type', 0),
+                pool_size=getattr(conn, 'pool_size', ()),
+                pool_stride=getattr(conn, 'pool_stride', ()),
+                has_bias=getattr(conn, 'use_bias', True),
+                is_res=getattr(conn, 'is_res', False),
+                label=conn.label or '',
+                n_bands=getattr(conn, 'n_bands', 0),
                 pre_slices=conn.pre_slices if any(s is not None for s in conn.pre_slices) else (),
                 post_slice=conn.post_slice if conn.post_slice is not None else (),
-                precision_activation_type=getattr(
-                    conn, "precision_activation_type", getattr(conn, "precision_param_type", 9)
-                ),
-                precision_clip_min=getattr(conn, "precision_clip_min", 0.0),
-                precision_clip_max=getattr(conn, "precision_clip_max", 0.0),
+                precision_activation_type=getattr(conn, 'precision_activation_type',
+                                                   getattr(conn, 'precision_param_type', 9)),
+                precision_clip_min=getattr(conn, 'precision_clip_min', 0.0),
+                precision_clip_max=getattr(conn, 'precision_clip_max', 0.0),
                 unit_precision=_is_unit_precision(conn),
-                error_activation_type=getattr(conn, "error_activation_type", 0),
-                post_activation_type=getattr(conn, "post_activation_type_id", 0),
-                is_masked=getattr(conn, "is_masked", False),
-                precision_input_norm=getattr(conn, "precision_input_norm", False),
-                stochastic=getattr(conn, "stochastic", True),
+                error_activation_type=getattr(conn, 'error_activation_type', 0),
+                post_activation_type=getattr(conn, 'post_activation_type_id', 0),
+                is_masked=getattr(conn, 'is_masked', False),
+                is_sparse=getattr(conn, 'is_sparse', False),
+                precision_input_norm=getattr(conn, 'precision_input_norm', False),
+                stochastic=getattr(conn, 'stochastic', True),
                 precision_input_idx=pin_idx,
                 precision_input_node_types=pin_ntypes,
                 precision_input_slices=pin_slices,
-                delay=int(getattr(conn, "delay", 0)),
-                delay_unit_ts=(getattr(conn, "delay_unit", "iteration") == "timestep"),
+                delay=int(getattr(conn, 'delay', 0)),
+                delay_unit_ts=(getattr(conn, 'delay_unit', 'iteration') == 'timestep'),
             )
 
-        predict_specs = tuple(_predict_spec(conn) for conn in self._predict_conns)
+        predict_specs = tuple(
+            _predict_spec(conn) for conn in self._predict_conns
+        )
 
         # Collect reward/loss functions from Project/Modulate connections.
         # Both reward_fn and loss_fn use the same (inputs, fn) signature, so
@@ -579,13 +589,13 @@ class PCNetwork:
                         sample_keys.add(elem)
 
         for conn in list(self._project_conns) + list(self._modulate_conns):
-            if hasattr(conn.update_rule, "reward_fn") and conn.update_rule.reward_fn is not None:
+            if hasattr(conn.update_rule, 'reward_fn') and conn.update_rule.reward_fn is not None:
                 inputs_spec, fn = conn.update_rule.reward_fn
                 resolved = self._resolve_loss_fn_inputs(inputs_spec)
                 _collect_keys(resolved)
                 conn.reward_fn_idx = len(reward_fns)
                 reward_fns.append((resolved, fn))
-            if hasattr(conn.update_rule, "loss_fn") and conn.update_rule.loss_fn is not None:
+            if hasattr(conn.update_rule, 'loss_fn') and conn.update_rule.loss_fn is not None:
                 inputs_spec, fn = conn.update_rule.loss_fn
                 resolved = self._resolve_loss_fn_inputs(inputs_spec)
                 _collect_keys(resolved)
@@ -603,29 +613,30 @@ class PCNetwork:
                 post_node_type=conn.post_node_type,
                 learning_rule_type=conn.update_rule.type_id,
                 learning_rate=conn.update_rule.learning_rate,
-                reward_fn_idx=getattr(conn, "reward_fn_idx", -1),
-                loss_fn_idx=getattr(conn, "loss_fn_idx", -1),
-                is_conv=getattr(conn, "is_conv", False),
-                is_transconv=getattr(conn, "is_transconv", False),
-                in_channels=getattr(conn, "in_channels", 0),
-                out_channels=getattr(conn, "out_channels", 0),
-                kernel_size=getattr(conn, "kernel_size", ()),
-                stride=getattr(conn, "stride", (1, 1)),
-                padding=getattr(conn, "padding", "SAME"),
-                input_spatial=getattr(conn, "input_shape", ()),
-                output_spatial=getattr(conn, "output_shape", ()),
-                pool_type=getattr(conn, "pool_type", 0),
-                pool_size=getattr(conn, "pool_size", ()),
-                pool_stride=getattr(conn, "pool_stride", ()),
-                n_bands=getattr(conn, "n_bands", 0),
+                reward_fn_idx=getattr(conn, 'reward_fn_idx', -1),
+                loss_fn_idx=getattr(conn, 'loss_fn_idx', -1),
+                is_conv=getattr(conn, 'is_conv', False),
+                is_transconv=getattr(conn, 'is_transconv', False),
+                in_channels=getattr(conn, 'in_channels', 0),
+                out_channels=getattr(conn, 'out_channels', 0),
+                kernel_size=getattr(conn, 'kernel_size', ()),
+                stride=getattr(conn, 'stride', (1, 1)),
+                padding=getattr(conn, 'padding', 'SAME'),
+                input_spatial=getattr(conn, 'input_shape', ()),
+                output_spatial=getattr(conn, 'output_shape', ()),
+                pool_type=getattr(conn, 'pool_type', 0),
+                pool_size=getattr(conn, 'pool_size', ()),
+                pool_stride=getattr(conn, 'pool_stride', ()),
+                n_bands=getattr(conn, 'n_bands', 0),
                 pre_slices=conn.pre_slices if any(s is not None for s in conn.pre_slices) else (),
                 post_slice=conn.post_slice if conn.post_slice is not None else (),
-                has_bias=getattr(conn, "use_bias", False),
-                post_activation_type=getattr(conn, "post_activation_type_id", 0),
-                is_masked=getattr(conn, "is_masked", False),
-                advance_timestep=(getattr(conn, "advance", "iteration") == "timestep"),
-                delay=int(getattr(conn, "delay", 0)),
-                delay_unit_ts=(getattr(conn, "delay_unit", "iteration") == "timestep"),
+                has_bias=getattr(conn, 'use_bias', False),
+                post_activation_type=getattr(conn, 'post_activation_type_id', 0),
+                is_masked=getattr(conn, 'is_masked', False),
+                is_sparse=getattr(conn, 'is_sparse', False),
+                advance_timestep=(getattr(conn, 'advance', 'iteration') == 'timestep'),
+                delay=int(getattr(conn, 'delay', 0)),
+                delay_unit_ts=(getattr(conn, 'delay_unit', 'iteration') == 'timestep'),
             )
             for conn in self._project_conns
         )
@@ -638,29 +649,30 @@ class PCNetwork:
                 post_node_type=conn.post_node_type,
                 learning_rule_type=conn.update_rule.type_id,
                 learning_rate=conn.update_rule.learning_rate,
-                reward_fn_idx=getattr(conn, "reward_fn_idx", -1),
-                loss_fn_idx=getattr(conn, "loss_fn_idx", -1),
-                is_conv=getattr(conn, "is_conv", False),
-                is_transconv=getattr(conn, "is_transconv", False),
-                in_channels=getattr(conn, "in_channels", 0),
-                out_channels=getattr(conn, "out_channels", 0),
-                kernel_size=getattr(conn, "kernel_size", ()),
-                stride=getattr(conn, "stride", (1, 1)),
-                padding=getattr(conn, "padding", "SAME"),
-                input_spatial=getattr(conn, "input_shape", ()),
-                output_spatial=getattr(conn, "output_shape", ()),
-                pool_type=getattr(conn, "pool_type", 0),
-                pool_size=getattr(conn, "pool_size", ()),
-                pool_stride=getattr(conn, "pool_stride", ()),
-                n_bands=getattr(conn, "n_bands", 0),
+                reward_fn_idx=getattr(conn, 'reward_fn_idx', -1),
+                loss_fn_idx=getattr(conn, 'loss_fn_idx', -1),
+                is_conv=getattr(conn, 'is_conv', False),
+                is_transconv=getattr(conn, 'is_transconv', False),
+                in_channels=getattr(conn, 'in_channels', 0),
+                out_channels=getattr(conn, 'out_channels', 0),
+                kernel_size=getattr(conn, 'kernel_size', ()),
+                stride=getattr(conn, 'stride', (1, 1)),
+                padding=getattr(conn, 'padding', 'SAME'),
+                input_spatial=getattr(conn, 'input_shape', ()),
+                output_spatial=getattr(conn, 'output_shape', ()),
+                pool_type=getattr(conn, 'pool_type', 0),
+                pool_size=getattr(conn, 'pool_size', ()),
+                pool_stride=getattr(conn, 'pool_stride', ()),
+                n_bands=getattr(conn, 'n_bands', 0),
                 pre_slices=conn.pre_slices if any(s is not None for s in conn.pre_slices) else (),
                 post_slice=conn.post_slice if conn.post_slice is not None else (),
-                has_bias=getattr(conn, "use_bias", False),
-                post_activation_type=getattr(conn, "post_activation_type_id", 0),
-                is_masked=getattr(conn, "is_masked", False),
-                advance_timestep=(getattr(conn, "advance", "iteration") == "timestep"),
-                delay=int(getattr(conn, "delay", 0)),
-                delay_unit_ts=(getattr(conn, "delay_unit", "iteration") == "timestep"),
+                has_bias=getattr(conn, 'use_bias', False),
+                post_activation_type=getattr(conn, 'post_activation_type_id', 0),
+                is_masked=getattr(conn, 'is_masked', False),
+                is_sparse=getattr(conn, 'is_sparse', False),
+                advance_timestep=(getattr(conn, 'advance', 'iteration') == 'timestep'),
+                delay=int(getattr(conn, 'delay', 0)),
+                delay_unit_ts=(getattr(conn, 'delay_unit', 'iteration') == 'timestep'),
             )
             for conn in self._modulate_conns
         )
@@ -686,7 +698,8 @@ class PCNetwork:
 
         def _with_buffers(spec):
             if spec.delay >= 1:
-                pbi = tuple(_buf_index[(pre, spec.delay_unit_ts)] for pre in spec.pre_idx)
+                pbi = tuple(_buf_index[(pre, spec.delay_unit_ts)]
+                            for pre in spec.pre_idx)
                 return spec._replace(pre_buffer_indices=pbi)
             return spec
 
@@ -721,17 +734,20 @@ class PCNetwork:
         modulate_conns_flow_post = tuple(
             (i, s) for i, s in enumerate(modulate_specs) if s.post_node_type == 4
         )
-        _flow_target_predict_idxs = {
-            s.post_idx for s in modulate_specs if s.post_node_type in (3, 4)
-        }
+        _flow_target_predict_idxs = set(
+            s.post_idx for s in modulate_specs if s.post_node_type in (3, 4))
         predict_has_flow_gates = tuple(
             i in _flow_target_predict_idxs for i in range(len(predict_specs))
         )
 
-        predict_error_dims = tuple(conn.post_dim for conn in self._predict_conns)
+        predict_error_dims = tuple(
+            conn.post_dim
+            for conn in self._predict_conns
+        )
 
         spatial_layers = tuple(
-            i for i, layer in enumerate(self._layers) if layer.spatial_structure != "none"
+            i for i, layer in enumerate(self._layers)
+            if layer.spatial_structure != 'none'
         )
 
         # GradientDescent connection indices (type_id=2).
@@ -739,13 +755,11 @@ class PCNetwork:
         # learned by a single-step jax.grad of that loss, never from the PC
         # energy backward pass.
         gd_loss_project = tuple(
-            (i, s.loss_fn_idx)
-            for i, s in enumerate(project_specs)
+            (i, s.loss_fn_idx) for i, s in enumerate(project_specs)
             if s.learning_rule_type == 2 and s.loss_fn_idx >= 0
         )
         gd_loss_modulate = tuple(
-            (i, s.loss_fn_idx)
-            for i, s in enumerate(modulate_specs)
+            (i, s.loss_fn_idx) for i, s in enumerate(modulate_specs)
             if s.learning_rule_type == 2 and s.loss_fn_idx >= 0
         )
 
@@ -755,7 +769,9 @@ class PCNetwork:
             if layer.inference_reg is not None
         )
         train_regs = tuple(
-            (layer._idx, layer.train_reg) for layer in self._layers if layer.train_reg is not None
+            (layer._idx, layer.train_reg)
+            for layer in self._layers
+            if layer.train_reg is not None
         )
 
         # Per-connection energy scale: 1 / (number of predict conns sharing the same pre layer).
@@ -766,11 +782,10 @@ class PCNetwork:
         for spec in predict_specs:
             for idx in spec.pre_idx:
                 _pre_counts[idx] = _pre_counts.get(idx, 0) + 1
-        predict_pre_scales = (
-            tuple(1.0 / max(_pre_counts[idx] for idx in spec.pre_idx) for spec in predict_specs)
-            if predict_specs
-            else ()
-        )
+        predict_pre_scales = tuple(
+            1.0 / max(_pre_counts[idx] for idx in spec.pre_idx)
+            for spec in predict_specs
+        ) if predict_specs else ()
 
         # ---- Phase 2: error/precision one-step carry buffers ----
         # The former dedicated ``prev_errors`` / ``prev_precisions`` carries are
@@ -781,30 +796,32 @@ class PCNetwork:
         # to the old ``() -> None`` prev path). Detection is a safe SUPERSET of
         # the true consumers — false positives only build unread buffers.
         _err_mem = any(
-            getattr(getattr(c, "error_activation", None), "has_memory", False)
-            for c in self._predict_conns
-        )
+            getattr(getattr(c, 'error_activation', None), 'has_memory', False)
+            for c in self._predict_conns)
         _prec_mem = any(
-            getattr(getattr(c, "precision_activation", None), "has_memory", False)
-            for c in self._predict_conns
-        )
+            getattr(getattr(c, 'precision_activation', None), 'has_memory', False)
+            for c in self._predict_conns)
         _all_pm_specs = project_specs + modulate_specs
-        _err_pre = any(getattr(s, "pre_node_type", 0) == 1 for s in _all_pm_specs)
-        _prec_pre = any(getattr(s, "pre_node_type", 0) == 2 for s in _all_pm_specs)
+        # perror (5) reads pi * eps — it consumes BOTH carries.
+        _err_pre = any(getattr(s, 'pre_node_type', 0) in (1, 5)
+                       for s in _all_pm_specs)
+        _prec_pre = any(getattr(s, 'pre_node_type', 0) in (2, 5)
+                        for s in _all_pm_specs)
         _err_target = bool(project_conns_internal or modulate_conns_internal)
         _prec_target = bool(project_conns_precision or modulate_conns_precision)
         _err_flow = any(
-            getattr(s, "pre_node_type", 0) == 1
-            for _, s in (modulate_conns_flow_pre + modulate_conns_flow_post)
-        )
+            getattr(s, 'pre_node_type', 0) == 1
+            for _, s in (modulate_conns_flow_pre + modulate_conns_flow_post))
         _pin_err = any(
-            1 in s.precision_input_node_types for s in predict_specs if s.precision_input_node_types
-        )
+            1 in s.precision_input_node_types
+            for s in predict_specs if s.precision_input_node_types)
         _pin_prec = any(
-            2 in s.precision_input_node_types for s in predict_specs if s.precision_input_node_types
-        )
-        errors_consumed = _err_mem or _err_pre or _err_target or _err_flow or _pin_err
-        precisions_consumed = _prec_mem or _prec_pre or _prec_target or _pin_prec
+            2 in s.precision_input_node_types
+            for s in predict_specs if s.precision_input_node_types)
+        errors_consumed = (
+            _err_mem or _err_pre or _err_target or _err_flow or _pin_err)
+        precisions_consumed = (
+            _prec_mem or _prec_pre or _prec_target or _pin_prec)
 
         _n_predict = len(predict_specs)
         if errors_consumed:
@@ -891,18 +908,18 @@ class PCNetwork:
             dim = layer.dim
             ss = layer.spatial_structure
 
-            if ss == "grid_1":
+            if ss == 'grid_1':
                 locations = self._make_grid_1d(dim)
-            elif ss == "grid_2":
+            elif ss == 'grid_2':
                 locations = self._make_grid_2d(dim)
-            elif ss == "hex_2":
+            elif ss == 'hex_2':
                 locations = self._make_hex_2d(dim)
             else:
                 raise ValueError(f"Unknown spatial_structure: {ss}")
 
             # Pairwise distances
             diffs = locations[:, None, :] - locations[None, :, :]
-            dists = np.sqrt(np.sum(diffs**2, axis=-1))
+            dists = np.sqrt(np.sum(diffs ** 2, axis=-1))
 
             # Compute sigma from mean nearest-neighbor distance
             dists_nn = dists.copy()
@@ -910,7 +927,7 @@ class PCNetwork:
             sigma = np.mean(np.min(dists_nn, axis=1))
 
             # Gaussian kernel
-            neighborhood = np.exp(-(dists**2) / (2 * sigma**2))
+            neighborhood = np.exp(-dists ** 2 / (2 * sigma ** 2))
 
             layer.locations = jnp.array(locations)
             layer.neighborhood = jnp.array(neighborhood)
@@ -918,7 +935,69 @@ class PCNetwork:
 
         self.spatial_neighborhoods = tuple(neighborhoods)
 
-    def _initialize_params(self, weight_initialization="xavier") -> NetworkParams:
+    def _resolve_sparse(self) -> None:
+        """Decide per connection whether ``sparse=`` becomes a ``SparseWeight``.
+
+        ``sparse=True`` → sparse. ``sparse='auto'`` → sparse iff
+        ``density <= AUTO_MAX_DENSITY and post*pre >= AUTO_MIN_SIZE``
+        (``pcn.core.sparse``). On Metal (jax-mps has no cuSPARSE custom-call)
+        the dense path is used unless ``pcn.core.sparse.SPARSE_ON_METAL`` is
+        True. A masked connection that falls back gets its index set
+        densified into ``conn.weight_mask``; a banded one keeps the band path.
+        """
+        import warnings
+        for conn in self._all_conns:
+            mode = getattr(conn, 'sparse_mode', False)
+            if not mode:
+                continue
+            rows, cols = conn.sparse_indices
+            shape = (conn.post_dim, conn.pre_dim)
+            use = resolve_sparse_mode(mode, len(rows), shape)
+            if use and jax.default_backend() == 'METAL' and not _sparse.SPARSE_ON_METAL:
+                warnings.warn(
+                    f"{conn!r}: sparse weights are not supported on the Metal "
+                    "backend (no cuSPARSE); using the dense masked path. Set "
+                    "PCN_SPARSE_ON_METAL=1 to force the generic sparse lowering.",
+                    RuntimeWarning, stacklevel=3)
+                use = False
+            conn.is_sparse = use
+            if not use and conn.is_masked and conn.weight_mask is None:
+                conn.weight_mask = indices_to_dense_mask(rows, cols, shape)
+
+    def _init_sparse_weight(self, conn, kind: str) -> SparseWeight:
+        """Initialise a ``SparseWeight`` for a ``sparse=True`` connection.
+
+        Same fan-in/fan-out statistics as the dense path of the same kind;
+        the values are drawn directly for the ``nse`` nonzeros, so the dense
+        ``(post, pre)`` matrix is never formed. A user ``init_weight`` is
+        sampled at the index set.
+        """
+        rows, cols = conn.sparse_indices
+        shape = (conn.post_dim, conn.pre_dim)
+        nse = len(rows)
+        if conn.weight is not None:
+            data = np.asarray(conn.weight, dtype=np.float32)
+            if data.shape != shape:
+                raise ValueError(
+                    f"init_weight shape {data.shape} does not match {shape}")
+            return SparseWeight.from_indices(rows, cols, shape, data[rows, cols])
+        self.rng, subkey = jax.random.split(self.rng)
+        noise = jax.random.normal(subkey, (nse,))
+        fan_in, fan_out = conn.pre_dim, conn.post_dim
+        if kind == 'predict':
+            first_pre = conn.pre[0]
+            if first_pre.f.init_type == 'xavier':
+                fan_avg = fan_in + fan_out
+            elif first_pre.f.init_type == 'he':
+                fan_avg = fan_in
+            data = noise * (first_pre.f.init_scale * jnp.sqrt(1.0 / fan_avg))
+        elif kind == 'project':
+            data = noise * (jnp.sqrt(2.0 / (fan_in + fan_out)) * getattr(conn, 'init_scale', 1.0))
+        else:  # modulate: identity-ish modulation at init (see dense path)
+            data = noise * 0.01 if conn.use_bias else 1.0 + noise * 0.01
+        return SparseWeight.from_indices(rows, cols, shape, np.asarray(data))
+
+    def _initialize_params(self, weight_initialization='xavier') -> NetworkParams:
         """Initialize all parameters.
 
         Also populates ``self.predict_weight_masks``, ``self.project_weight_masks``,
@@ -930,13 +1009,15 @@ class PCNetwork:
         predict_weights = []
 
         for conn in self._predict_conns:
-            if conn.weight is not None:  # user set their own weight matrix
+            if getattr(conn, 'is_sparse', False):
+                predict_weights.append(self._init_sparse_weight(conn, 'predict'))
+            elif conn.weight is not None:  # user set their own weight matrix
                 W = jnp.array(conn.weight)
-                if getattr(conn, "is_masked", False):
+                if getattr(conn, 'is_masked', False):
                     W = W * jnp.asarray(conn.weight_mask, dtype=W.dtype)
                 predict_weights.append(W)
             else:
-                if getattr(conn, "is_conv", False) or getattr(conn, "is_transconv", False):
+                if getattr(conn, 'is_conv', False) or getattr(conn, 'is_transconv', False):
                     kH, kW = conn.kernel_size
                     fan_in = conn.in_channels * kH * kW
                     fan_out = conn.out_channels * kH * kW
@@ -948,18 +1029,16 @@ class PCNetwork:
                 self.rng, subkey = jax.random.split(self.rng)
                 # Use first pre layer's activation for init type
                 first_pre = conn.pre[0]
-                if first_pre.f.init_type == "xavier":
+                if first_pre.f.init_type == 'xavier':
                     fan_avg = fan_in + fan_out
-                elif first_pre.f.init_type == "he":
+                elif first_pre.f.init_type == 'he':
                     fan_avg = fan_in
 
                 stddev = first_pre.f.init_scale * jnp.sqrt(1.0 / fan_avg)
                 W = jax.random.normal(subkey, shape) * stddev
-                if conn.n_bands > 0 and not (
-                    getattr(conn, "is_conv", False) or getattr(conn, "is_transconv", False)
-                ):
+                if conn.n_bands > 0 and not (getattr(conn, 'is_conv', False) or getattr(conn, 'is_transconv', False)):
                     W = W * _make_band_mask(fan_out, fan_in, conn.n_bands)
-                if getattr(conn, "is_masked", False):
+                if getattr(conn, 'is_masked', False):
                     W = W * jnp.asarray(conn.weight_mask, dtype=W.dtype)
                 predict_weights.append(W)
 
@@ -968,11 +1047,13 @@ class PCNetwork:
         for conn in self._project_conns:
             pre_dim = conn.pre_dim
             post_dim = conn.post_dim
-            is_conv = getattr(conn, "is_conv", False) or getattr(conn, "is_transconv", False)
+            is_conv = getattr(conn, 'is_conv', False) or getattr(conn, 'is_transconv', False)
 
-            if conn.weight is not None:
+            if getattr(conn, 'is_sparse', False):
+                project_weights.append(self._init_sparse_weight(conn, 'project'))
+            elif conn.weight is not None:
                 W = jnp.array(conn.weight)
-                if getattr(conn, "is_masked", False):
+                if getattr(conn, 'is_masked', False):
                     W = W * jnp.asarray(conn.weight_mask, dtype=W.dtype)
                 project_weights.append(W)
             else:
@@ -987,11 +1068,11 @@ class PCNetwork:
                     fan_out = post_dim
                 self.rng, subkey = jax.random.split(self.rng)
                 stddev = jnp.sqrt(2.0 / (fan_in + fan_out))
-                stddev = stddev * getattr(conn, "init_scale", 1.0)
+                stddev = stddev * getattr(conn, 'init_scale', 1.0)
                 W = jax.random.normal(subkey, shape) * stddev
                 if conn.n_bands > 0 and not is_conv:
                     W = W * _make_band_mask(fan_out, fan_in, conn.n_bands)
-                if getattr(conn, "is_masked", False):
+                if getattr(conn, 'is_masked', False):
                     W = W * jnp.asarray(conn.weight_mask, dtype=W.dtype)
                 project_weights.append(W)
 
@@ -1009,7 +1090,7 @@ class PCNetwork:
         for conn in self._modulate_conns:
             pre_dim = conn.pre_dim
             post_dim = conn.post_dim
-            is_conv = getattr(conn, "is_conv", False) or getattr(conn, "is_transconv", False)
+            is_conv = getattr(conn, 'is_conv', False) or getattr(conn, 'is_transconv', False)
 
             if is_conv:
                 kH, kW = conn.kernel_size
@@ -1017,7 +1098,9 @@ class PCNetwork:
             else:
                 shape = (post_dim, pre_dim)
 
-            if conn.weight is not None:
+            if getattr(conn, 'is_sparse', False):
+                W = self._init_sparse_weight(conn, 'modulate')
+            elif conn.weight is not None:
                 W = jnp.array(conn.weight)
             else:
                 self.rng, subkey = jax.random.split(self.rng)
@@ -1036,9 +1119,11 @@ class PCNetwork:
                     modulate_biases.append(jnp.ones(bias_dim, dtype=jnp.float32))
             else:
                 modulate_biases.append(jnp.zeros(1, dtype=jnp.float32))  # dummy, always adds 0
-            if conn.n_bands > 0 and not is_conv:
+            if getattr(conn, 'is_sparse', False):
+                pass  # structure is the mask
+            elif conn.n_bands > 0 and not is_conv:
                 W = W * _make_band_mask(post_dim, pre_dim, conn.n_bands)
-            if getattr(conn, "is_masked", False):
+            elif getattr(conn, 'is_masked', False):
                 W = W * jnp.asarray(conn.weight_mask, dtype=W.dtype)
             modulate_weights.append(W)
 
@@ -1047,7 +1132,7 @@ class PCNetwork:
             if conn.use_bias and conn.bias is not None:
                 predict_biases.append(jnp.array(conn.bias, dtype=jnp.float32))
             elif conn.use_bias:
-                is_conv = getattr(conn, "is_conv", False) or getattr(conn, "is_transconv", False)
+                is_conv = getattr(conn, 'is_conv', False) or getattr(conn, 'is_transconv', False)
                 if is_conv:
                     predict_biases.append(jnp.zeros(conn.out_channels, dtype=jnp.float32))
                 else:
@@ -1067,10 +1152,7 @@ class PCNetwork:
         # For any other activation we set bias = init_precision raw — the user
         # has opted out of the recommended set and is responsible for choosing
         # an init that yields a sensible starting precision under that g.
-        from .activations import Direct as _Direct
-        from .activations import Exp as _Exp
-        from .activations import Softplus as _Softplus
-
+        from .activations import Exp as _Exp, Softplus as _Softplus, Direct as _Direct
         precision_weights = []
         precision_biases = []
         for conn in self._predict_conns:
@@ -1096,20 +1178,14 @@ class PCNetwork:
 
             # Rows: a conn with both precision-learn flags off carries a single
             # broadcast row; otherwise one row per post dim.
-            rows = (
-                1
-                if not conn.learn_precision_weights and not conn.learn_precision_bias
-                else post_dim
-            )
+            rows = (1 if not conn.learn_precision_weights
+                    and not conn.learn_precision_bias else post_dim)
             # W_rho defaults to zeros so the starting precision is exactly
             # init_precision; ``init_precision_weights`` overrides it (validated
             # + broadcast against the resolved precision input dim).
             user_pw = conn.resolve_init_precision_weights(rows)
-            pw = (
-                jnp.zeros((rows, pin_dim), dtype=jnp.float32)
-                if user_pw is None
-                else jnp.asarray(user_pw, dtype=jnp.float32)
-            )
+            pw = (jnp.zeros((rows, pin_dim), dtype=jnp.float32) if user_pw is None
+                  else jnp.asarray(user_pw, dtype=jnp.float32))
             pb = jnp.full(rows, bias_val, dtype=jnp.float32)
             precision_weights.append(pw)
             precision_biases.append(pb)
@@ -1119,7 +1195,7 @@ class PCNetwork:
         _dummy_mask = jnp.zeros((), dtype=jnp.float32)
 
         def _mask_for(conn):
-            if getattr(conn, "is_masked", False):
+            if getattr(conn, 'is_masked', False) and not getattr(conn, 'is_sparse', False):
                 return jnp.asarray(conn.weight_mask, dtype=jnp.float32)
             return _dummy_mask
 
@@ -1128,11 +1204,12 @@ class PCNetwork:
         self.modulate_weight_masks = tuple(_mask_for(c) for c in self._modulate_conns)
 
         # Cache the Activation instances for backend memory-dispatch.
-        self.predict_error_activations = tuple(c.error_activation for c in self._predict_conns)
+        self.predict_error_activations = tuple(
+            c.error_activation for c in self._predict_conns)
         self.predict_precision_activations = tuple(
-            c.precision_activation for c in self._predict_conns
-        )
-        self.layer_activations = tuple(layer.activation for layer in self._layers)
+            c.precision_activation for c in self._predict_conns)
+        self.layer_activations = tuple(
+            layer.activation for layer in self._layers)
 
         return NetworkParams(
             predict_weights=predict_weights,
@@ -1145,17 +1222,60 @@ class PCNetwork:
             precision_biases=precision_biases,
         )
 
+    def dense_weights(self, kind: str = 'predict') -> tuple:
+        """Weights of one kind as dense arrays (``SparseWeight`` → ``todense()``).
+
+        For snapshots / analysis only — materialises every sparse conn.
+        """
+        return tuple(w.todense() if isinstance(w, SparseWeight) else w
+                     for w in getattr(self.params, f'{kind}_weights'))
+
+    def donatable_weight_masks(self, kind: str) -> tuple:
+        """Weight masks for a ``donate='all'`` JIT call, safe to hand over.
+
+        ``run_batch`` / ``run_bptt_batch`` are ``@eqx.filter_jit(donate='all')``,
+        so *every* array argument is offered to XLA for buffer aliasing. Weight
+        masks are structural constants that must survive for the lifetime of the
+        network, but XLA happily aliases one into a same-shaped output (a masked
+        connection's weight matrix has exactly the mask's shape), which deletes
+        the network's copy — the next call then raises
+        ``RuntimeError: Array has been deleted``. Symptom: any network with a
+        ``transformation='masked'`` connection fails on the *second*
+        ``train()`` / ``test()`` call.
+
+        So hand the JIT a fresh copy and keep the canonical arrays here. The
+        copies are device-to-device and transient (freed after the call), which
+        is negligible next to a batch of inference.
+
+        Args:
+            kind: ``'predict'``, ``'project'`` or ``'modulate'``.
+
+        Returns:
+            Tuple of masks, one per connection of that kind. Unmasked positions
+            keep their 0-dim dummy (never read — the backend guards on
+            ``spec.is_masked``) and are passed through without copying.
+        """
+        masks = getattr(self, f'{kind}_weight_masks', ())
+        if not masks:
+            return masks
+        # 0-dim dummies cannot alias a real weight; only copy the live masks.
+        return tuple(jnp.array(m, copy=True) if getattr(m, 'ndim', 0) > 0 else m
+                     for m in masks)
+
     def get_layer(self, identifier) -> Layer:
-        """Get a layer by label or index.
+        """
+        Get a layer by label or index.
 
         Args:
             identifier: Either a string label or integer index
 
         Returns:
             The Layer object
-
         """
-        idx = self.label_to_idx[identifier] if isinstance(identifier, str) else identifier
+        if isinstance(identifier, str):
+            idx = self.label_to_idx[identifier]
+        else:
+            idx = identifier
         return self._layers[idx]
 
     def multi_transform(self, optim_dict, default_optim):
@@ -1201,72 +1321,62 @@ class PCNetwork:
                 {'predict': optax.adam(1e-3), 'precision': optax.sgd(1e-5)},
                 default_optim=optax.adam(1e-4),
             )
-
         """
         import optax
 
         if self.structure is None:
             raise RuntimeError(
-                "Network must be built before calling multi_transform. Call net.build() first."
+                "Network must be built before calling multi_transform. "
+                "Call net.build() first."
             )
 
-        param_types = (
-            "predict_weights",
-            "predict_biases",
-            "project_biases",
-            "modulate_biases",
-            "precision_weights",
-            "precision_biases",
-            "gd_loss_project_weights",
-            "gd_loss_modulate_weights",
-        )
+        param_types = ('predict_weights', 'predict_biases',
+                       'project_biases', 'modulate_biases',
+                       'precision_weights', 'precision_biases',
+                       'gd_loss_project_weights', 'gd_loss_modulate_weights')
 
         predict_conn_labels = [conn.label for conn in self._predict_conns]
         project_conn_labels = [conn.label for conn in self._project_conns]
         modulate_conn_labels = [conn.label for conn in self._modulate_conns]
         gd_loss_project_conn_labels = [
-            conn.label
-            for conn in self._project_conns
-            if conn.update_rule.type_id == 2 and conn.update_rule.loss_fn is not None
-        ]
+            conn.label for conn in self._project_conns
+            if conn.update_rule.type_id == 2 and conn.update_rule.loss_fn is not None]
         gd_loss_modulate_conn_labels = [
-            conn.label
-            for conn in self._modulate_conns
-            if conn.update_rule.type_id == 2 and conn.update_rule.loss_fn is not None
-        ]
+            conn.label for conn in self._modulate_conns
+            if conn.update_rule.type_id == 2 and conn.update_rule.loss_fn is not None]
 
         # Map category (from param_type.rsplit('_', 1)[0]) to its connection labels
         conn_labels_for_category = {
-            "predict": predict_conn_labels,
-            "project": project_conn_labels,
-            "modulate": modulate_conn_labels,
-            "precision": predict_conn_labels,
-            "gd_loss_project": gd_loss_project_conn_labels,
-            "gd_loss_modulate": gd_loss_modulate_conn_labels,
+            'predict': predict_conn_labels,
+            'project': project_conn_labels,
+            'modulate': modulate_conn_labels,
+            'precision': predict_conn_labels,
+            'gd_loss_project': gd_loss_project_conn_labels,
+            'gd_loss_modulate': gd_loss_modulate_conn_labels,
         }
 
         # Category shorthand matching — ordered most-specific to least-specific.
         # First match wins, so 'loss_project' beats 'project' when both are keys.
         subcategory_map = {
-            "predict": ("predict",),
-            "project": ("project",),
-            "modulate": ("modulate",),
-            "precision": ("precision",),
-            "gd_loss_project": ("gd_loss_project", "loss_project", "project"),
-            "gd_loss_modulate": ("gd_loss_modulate", "loss_modulate", "modulate"),
+            'predict': ('predict',),
+            'project': ('project',),
+            'modulate': ('modulate',),
+            'precision': ('precision',),
+            'gd_loss_project': ('gd_loss_project', 'loss_project', 'project'),
+            'gd_loss_modulate': ('gd_loss_modulate', 'loss_modulate', 'modulate'),
         }
 
-        default_key = "__default__"
+        default_key = '__default__'
         label_map = {}
 
         for pt in param_types:
-            category, kind = pt.rsplit("_", 1)
+            category, kind = pt.rsplit('_', 1)
             labels_for_pt = []
             conn_labels = conn_labels_for_category[category]
 
             for conn_label in conn_labels:
                 # Priority 1: '{conn_label}_{param_type}'
-                specific_key = f"{conn_label}_{pt}"
+                specific_key = f'{conn_label}_{pt}'
                 if specific_key in optim_dict:
                     labels_for_pt.append(specific_key)
                     continue
@@ -1321,23 +1431,22 @@ class PCNetwork:
     def _get_git_hash() -> str:
         """Return the current git revision hash, or 'unknown' on failure."""
         import subprocess
-
         try:
             return (
                 subprocess.check_output(
-                    ["git", "rev-parse", "HEAD"],
+                    ['git', 'rev-parse', 'HEAD'],
                     stderr=subprocess.DEVNULL,
                 )
-                .decode("ascii")
+                .decode('ascii')
                 .strip()
             )
         except Exception:
-            return "unknown"
+            return 'unknown'
 
     def save(
         self,
-        path: str | Path | None = None,
-        simulation_results: dict[str, Any] | None = None,
+        path: Optional[Union[str, Path]] = None,
+        simulation_results: Optional[Dict[str, Any]] = None,
     ) -> Path:
         """Save network structure, parameters, and optional simulation results.
 
@@ -1367,11 +1476,9 @@ class PCNetwork:
 
         Returns:
             The resolved :class:`~pathlib.Path` of the saved file.
-
         """
-        from datetime import datetime
-
         import h5py
+        from datetime import datetime, timezone
 
         if self.structure is None or self.params is None:
             raise RuntimeError("Network must be built before saving. Call net.build() first.")
@@ -1380,18 +1487,18 @@ class PCNetwork:
         if path is None:
             first = self.structure.layers[0].label
             last = self.structure.layers[-1].label
-            save_dir = Path("saved_models")
+            save_dir = Path('saved_models')
             save_dir.mkdir(parents=True, exist_ok=True)
-            path = save_dir / f"{first}_{last}.h5"
+            path = save_dir / f'{first}_{last}.h5'
         else:
             path = Path(path)
             path.parent.mkdir(parents=True, exist_ok=True)
 
-        with h5py.File(path, "w") as f:
+        with h5py.File(path, 'w') as f:
             # -- metadata --
-            meta = f.create_group("metadata")
-            meta.attrs["saved_at"] = datetime.now(UTC).isoformat()
-            meta.attrs["code_version"] = self._get_git_hash()
+            meta = f.create_group('metadata')
+            meta.attrs['saved_at'] = datetime.now(timezone.utc).isoformat()
+            meta.attrs['code_version'] = self._get_git_hash()
 
             # -- structure --
             self._save_structure(f, self.structure)
@@ -1408,7 +1515,6 @@ class PCNetwork:
     @staticmethod
     def _save_structure(f, structure: NetworkStructure) -> None:
         """Write NetworkStructure to HDF5 groups."""
-
         def _set_attr(g, field, value):
             # Spec fields are write-only metadata (load() reads only
             # layer_dims + params). Values h5py cannot store natively —
@@ -1420,39 +1526,41 @@ class PCNetwork:
             except TypeError:
                 g.attrs[field] = repr(value)
 
-        sg = f.create_group("structure")
-        sg.attrs["layer_dims"] = list(structure.layer_dims)
-        sg.attrs["predict_error_dims"] = list(structure.predict_error_dims)
+        sg = f.create_group('structure')
+        sg.attrs['layer_dims'] = list(structure.layer_dims)
+        sg.attrs['predict_error_dims'] = list(structure.predict_error_dims)
 
         # Layers
-        lg = sg.create_group("layers")
+        lg = sg.create_group('layers')
         for i, spec in enumerate(structure.layers):
             g = lg.create_group(str(i))
-            g.attrs["dim"] = spec.dim
-            g.attrs["activation_type"] = spec.activation_type
-            g.attrs["label"] = spec.label
-            g.attrs["dynamics_rate"] = spec.dynamics_rate
-            g.attrs["is_poisson"] = spec.is_poisson
-            g.attrs["dropout_prob"] = float(spec.dropout_prob)
-            g.attrs["activation_temperature"] = float(spec.activation_temperature)
-            g.attrs["activation_num_winners"] = int(spec.activation_num_winners)
+            g.attrs['dim'] = spec.dim
+            g.attrs['activation_type'] = spec.activation_type
+            g.attrs['label'] = spec.label
+            g.attrs['dynamics_rate'] = spec.dynamics_rate
+            g.attrs['is_poisson'] = spec.is_poisson
+            g.attrs['dropout_prob'] = float(spec.dropout_prob)
+            g.attrs['activation_temperature'] = float(spec.activation_temperature)
+            g.attrs['activation_num_winners'] = int(spec.activation_num_winners)
+            g.attrs['activation_thresholds'] = np.asarray(
+                spec.activation_thresholds, dtype=np.float64)
 
         # Predict connections
-        pg = sg.create_group("predict_conns")
+        pg = sg.create_group('predict_conns')
         for i, spec in enumerate(structure.predict_conns):
             g = pg.create_group(str(i))
             for field in spec._fields:
                 _set_attr(g, field, getattr(spec, field))
 
         # Project connections
-        prg = sg.create_group("project_conns")
+        prg = sg.create_group('project_conns')
         for i, spec in enumerate(structure.project_conns):
             g = prg.create_group(str(i))
             for field in spec._fields:
                 _set_attr(g, field, getattr(spec, field))
 
         # Modulate connections
-        mg = sg.create_group("modulate_conns")
+        mg = sg.create_group('modulate_conns')
         for i, spec in enumerate(structure.modulate_conns):
             g = mg.create_group(str(i))
             for field in spec._fields:
@@ -1461,37 +1569,38 @@ class PCNetwork:
     @staticmethod
     def _save_params(f, params: NetworkParams) -> None:
         """Write NetworkParams to HDF5 datasets."""
-        pg = f.create_group("params")
-        for name in (
-            "predict_weights",
-            "predict_biases",
-            "project_weights",
-            "project_biases",
-            "modulate_weights",
-            "modulate_biases",
-            "precision_weights",
-            "precision_biases",
-        ):
+        pg = f.create_group('params')
+        for name in ('predict_weights', 'predict_biases',
+                     'project_weights', 'project_biases',
+                     'modulate_weights', 'modulate_biases',
+                     'precision_weights', 'precision_biases'):
             grp = pg.create_group(name)
             for i, arr in enumerate(getattr(params, name)):
-                grp.create_dataset(str(i), data=np.asarray(arr, dtype=np.float32))
+                if isinstance(arr, SparseWeight):
+                    sg = grp.create_group(str(i))
+                    sg.attrs['sparse'] = True
+                    sg.attrs['shape'] = np.asarray(arr.shape, dtype=np.int64)
+                    for fld in ('data', 'indices', 'indptr', 't_indptr', 't_perm'):
+                        sg.create_dataset(fld, data=np.asarray(getattr(arr, fld)))
+                else:
+                    grp.create_dataset(str(i), data=np.asarray(arr, dtype=np.float32))
 
     @staticmethod
-    def _save_results(f, results: dict[str, Any]) -> None:
+    def _save_results(f, results: Dict[str, Any]) -> None:
         """Write simulation results to HDF5."""
-        rg = f.create_group("results")
+        rg = f.create_group('results')
         for key, value in results.items():
             if value is None:
                 continue
             try:
                 arr = np.asarray(value, dtype=np.float32)
-                if arr.dtype.kind in ("f", "i", "u", "b"):
+                if arr.dtype.kind in ('f', 'i', 'u', 'b'):
                     rg.create_dataset(key, data=arr)
             except (ValueError, TypeError):
                 # Skip non-numeric results that can't be converted
                 pass
 
-    def load(self, path: str | Path) -> "PCNetwork":
+    def load(self, path: Union[str, Path]) -> 'PCNetwork':
         """Load network parameters from an HDF5 file.
 
         Restores ``self.params`` (predict/project/modulate weights and
@@ -1507,57 +1616,76 @@ class PCNetwork:
         Raises:
             RuntimeError: If the network has not been built yet.
             ValueError: If the saved structure doesn't match the current one.
-
         """
         import h5py
 
         if self.structure is None:
             raise RuntimeError(
-                "Network must be built before loading parameters. Call net.build() first."
+                "Network must be built before loading parameters. "
+                "Call net.build() first."
             )
 
         path = Path(path)
-        with h5py.File(path, "r") as f:
+        with h5py.File(path, 'r') as f:
             # Validate structure matches
-            saved_dims = tuple(f["structure"].attrs["layer_dims"])
+            saved_dims = tuple(f['structure'].attrs['layer_dims'])
             if saved_dims != self.structure.layer_dims:
                 raise ValueError(
                     f"Layer dims mismatch: saved {saved_dims} vs "
                     f"current {self.structure.layer_dims}"
                 )
 
-            self.params = self._load_params(f)
+            params = self._load_params(f)
+
+        # A sparse conn must load a SparseWeight and a dense one a matrix.
+        # Validate before touching self.params so a failed load is a no-op.
+        for kind, specs in (('predict', self.structure.predict_conns),
+                            ('project', self.structure.project_conns),
+                            ('modulate', self.structure.modulate_conns)):
+            for i, (w, spec) in enumerate(zip(getattr(params, f'{kind}_weights'), specs)):
+                if isinstance(w, SparseWeight) != bool(spec.is_sparse):
+                    raise ValueError(
+                        f"{kind} conn {i}: saved weight is "
+                        f"{'sparse' if isinstance(w, SparseWeight) else 'dense'} but the "
+                        f"built network expects {'sparse' if spec.is_sparse else 'dense'} "
+                        f"(sparse= mismatch).")
+        self.params = params
 
         return self
 
     @staticmethod
     def _load_params(f) -> NetworkParams:
         """Read NetworkParams from an HDF5 file."""
-        pg = f["params"]
+        import h5py
+        pg = f['params']
         loaded = {}
-        for name in (
-            "predict_weights",
-            "predict_biases",
-            "project_weights",
-            "project_biases",
-            "modulate_weights",
-            "modulate_biases",
-            "precision_weights",
-            "precision_biases",
-        ):
+        for name in ('predict_weights', 'predict_biases',
+                     'project_weights', 'project_biases',
+                     'modulate_weights', 'modulate_biases',
+                     'precision_weights', 'precision_biases'):
             if name not in pg:
                 # Backward compat: old files without modulate_biases/project_biases — default to dummy zeros
-                if name == "modulate_biases":
-                    n_mw = len(pg.get("modulate_weights", {}))
+                if name == 'modulate_biases':
+                    n_mw = len(pg.get('modulate_weights', {}))
                     loaded[name] = [jnp.zeros(1, dtype=jnp.float32) for _ in range(n_mw)]
                     continue
-                if name == "project_biases":
-                    n_pw = len(pg.get("project_weights", {}))
+                if name == 'project_biases':
+                    n_pw = len(pg.get('project_weights', {}))
                     loaded[name] = [jnp.zeros(1, dtype=jnp.float32) for _ in range(n_pw)]
                     continue
             grp = pg[name]
             arrays = []
             for i in range(len(grp)):
-                arrays.append(jnp.array(grp[str(i)][...]))
+                item = grp[str(i)]
+                if isinstance(item, h5py.Group):     # SparseWeight
+                    arrays.append(SparseWeight(
+                        data=jnp.asarray(item['data'][...], dtype=jnp.float32),
+                        indices=jnp.asarray(item['indices'][...], dtype=jnp.int32),
+                        indptr=jnp.asarray(item['indptr'][...], dtype=jnp.int32),
+                        t_indptr=jnp.asarray(item['t_indptr'][...], dtype=jnp.int32),
+                        t_perm=jnp.asarray(item['t_perm'][...], dtype=jnp.int32),
+                        shape=tuple(int(v) for v in item.attrs['shape'])))
+                else:
+                    arrays.append(jnp.array(item[...]))
             loaded[name] = arrays
         return NetworkParams(**loaded)

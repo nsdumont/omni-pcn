@@ -1,4 +1,5 @@
-"""PCN Core Module - Network definition classes and data structures.
+"""
+PCN Core Module - Network definition classes and data structures.
 
 This module provides the user-facing API for defining predictive coding networks:
 - PCNetwork: Context manager for network definition
@@ -8,60 +9,62 @@ This module provides the user-facing API for defining predictive coding networks
 - Learning rules: Hebbian, Oja, ThreeFactorHebbian
 """
 
-from .activations import Activation, Direct, Relu, Sigmoid, Softmax, Tanh
-from .connections import Modulate, Predict, Project
-from .layer import Layer, NodeRef
-from .learning_rules import Hebbian, LearningRule, Oja, ThreeFactorHebbian
-from .network import PCNetwork
-from .optimizers import natural_gradient_precision
-from .regularization import L1Norm, L2Norm, SIGReg, SumReg, SupConLoss, UnitNorm
-from .state import NetworkParams, NetworkState
+from .state import NetworkState, NetworkParams
+from .sparse import SparseWeight
 from .structure import (
-    LayerSpec,
-    ModulateConnSpec,
     NetworkStructure,
+    LayerSpec,
     PredictConnSpec,
     ProjectConnSpec,
+    ModulateConnSpec,
 )
+from .activations import Activation, Direct, Relu, Softmax, Tanh, Sigmoid
+from .learning_rules import LearningRule, Hebbian, Oja, ThreeFactorHebbian
+from .layer import Layer, NodeRef
+from .connections import Predict, Project, Modulate
+from .network import PCNetwork
+from .regularization import L1Norm, L2Norm, UnitNorm, SIGReg, SupConLoss, SumReg
+from .optimizers import natural_gradient_precision
 
 __all__ = [
     # State and params
-    "NetworkState",
-    "NetworkParams",
+    'NetworkState',
+    'NetworkParams',
+    'SparseWeight',
     # Structure
-    "NetworkStructure",
-    "LayerSpec",
-    "PredictConnSpec",
-    "ProjectConnSpec",
-    "ModulateConnSpec",
+    'NetworkStructure',
+    'LayerSpec',
+    'PredictConnSpec',
+    'ProjectConnSpec',
+    'ModulateConnSpec',
     # Activations
-    "Activation",
-    "Direct",
-    "Relu",
-    "Softmax",
-    "Tanh",
-    "Sigmoid",
+    'Activation',
+    'Direct',
+    'Relu',
+    'Softmax',
+    'Tanh',
+    'Sigmoid',
     # Learning rules
-    "LearningRule",
-    "Hebbian",
-    "Oja",
-    "ThreeFactorHebbian",
+    'LearningRule',
+    'Hebbian',
+    'Oja',
+    'ThreeFactorHebbian',
     # Layer and nodes
-    "Layer",
-    "NodeRef",
+    'Layer',
+    'NodeRef',
     # Connections
-    "Predict",
-    "Project",
-    "Modulate",
+    'Predict',
+    'Project',
+    'Modulate',
     # Network
-    "PCNetwork",
+    'PCNetwork',
     # Regularization
-    "L1Norm",
-    "L2Norm",
-    "UnitNorm",
-    "SIGReg",
-    "SupConLoss",
-    "SumReg",
+    'L1Norm',
+    'L2Norm',
+    'UnitNorm',
+    'SIGReg',
+    'SupConLoss',
+    'SumReg',
     # Optimizers
-    "natural_gradient_precision",
+    'natural_gradient_precision',
 ]

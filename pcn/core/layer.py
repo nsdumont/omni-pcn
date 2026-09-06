@@ -1,21 +1,22 @@
-"""Layer and NodeRef classes for defining predictive coding network architecture.
+"""
+Layer and NodeRef classes for defining predictive coding network architecture.
 
 Layers are the main building blocks of PCN networks. Each layer has value nodes.
 Error and precision nodes belong to Predict connections, not layers.
 NodeRef allows referencing specific nodes for Project and Modulate connections.
 """
 
-from typing import TYPE_CHECKING
-
-from ..config import _DEFAULT
+from typing import TYPE_CHECKING, Optional
 from .activations import Activation
+from ..config import _DEFAULT
 
 if TYPE_CHECKING:
     from .network import PCNetwork
 
 
 class NodeRef:
-    """Reference to a specific node (value, error, precision) within a layer or
+    """
+    Reference to a specific node (value, error, precision) within a layer or
     predict connection, optionally restricted to a slice of dimensions.
 
     Used as source/target for Project and Modulate connections, allowing
@@ -26,10 +27,10 @@ class NodeRef:
         owner_type: 'layer' or 'predict'
         node_type: String identifying the node ('value', 'error', or 'precision')
         slice_bounds: Optional (start, stop) tuple restricting to a subset of dims
-
     """
 
-    def __init__(self, owner, node_type: str, owner_type: str = "layer", slice_bounds=None):
+    def __init__(self, owner, node_type: str, owner_type: str = 'layer',
+                 slice_bounds=None):
         self.owner = owner
         self.node_type = node_type
         self.owner_type = owner_type
@@ -39,7 +40,7 @@ class NodeRef:
     @property
     def _full_dim(self) -> int:
         """Full dimensionality of the underlying node (before slicing)."""
-        if self.owner_type == "layer":
+        if self.owner_type == 'layer':
             return self.owner.dim
         else:
             return self.owner.post.dim
@@ -53,28 +54,29 @@ class NodeRef:
 
     @property
     def layer(self):
-        """Returns owner if it's a layer, raises otherwise."""
-        if self.owner_type == "layer":
+        """returns owner if it's a layer, raises otherwise."""
+        if self.owner_type == 'layer':
             return self.owner
         raise AttributeError(
-            "NodeRef owner is a predict connection, not a layer. Use .predict_conn instead."
+            f"NodeRef owner is a predict connection, not a layer. "
+            f"Use .predict_conn instead."
         )
 
     @property
     def predict_conn(self):
         """Returns owner if it's a predict connection, raises otherwise."""
-        if self.owner_type == "predict":
+        if self.owner_type == 'predict':
             return self.owner
         raise AttributeError(
-            "NodeRef owner is a layer, not a predict connection. Use .layer instead."
+            f"NodeRef owner is a layer, not a predict connection. "
+            f"Use .layer instead."
         )
 
     @property
     def node_type_id(self) -> int:
         """Numeric ID for the node type (used in backend)."""
-        return {"value": 0, "error": 1, "precision": 2, "flow_to_pre": 3, "flow_to_post": 4}[
-            self.node_type
-        ]
+        return {'value': 0, 'error': 1, 'precision': 2,
+                'flow_to_pre': 3, 'flow_to_post': 4, 'perror': 5}[self.node_type]
 
     @property
     def activation(self):
@@ -91,16 +93,15 @@ class NodeRef:
         Flow nodes (``flow_to_pre`` / ``flow_to_post``) have no
         associated activation and raise ``AttributeError``.
         """
-        if self.owner_type == "layer":
+        if self.owner_type == 'layer':
             return self.owner.activation
-        if self.node_type == "error":
+        if self.node_type == 'error':
             return self.owner.error_activation
-        if self.node_type == "precision":
+        if self.node_type == 'precision':
             return self.owner.precision_activation
         raise AttributeError(
             f"NodeRef.activation is not defined for node_type "
-            f"{self.node_type!r} on a predict connection"
-        )
+            f"{self.node_type!r} on a predict connection")
 
     def _parse_key(self, key):
         """Parse an index/slice key into (start, stop) bounds."""
@@ -109,7 +110,8 @@ class NodeRef:
             if key < 0:
                 key += full
             if not (0 <= key < full):
-                raise IndexError(f"Index {key} out of range for dimension {full}")
+                raise IndexError(
+                    f"Index {key} out of range for dimension {full}")
             return (key, key + 1)
         elif isinstance(key, slice):
             if key.step is not None:
@@ -123,19 +125,22 @@ class NodeRef:
             start = max(0, min(start, full))
             stop = max(0, min(stop, full))
             if start >= stop:
-                raise ValueError(f"Empty slice [{start}:{stop}] for dimension {full}")
+                raise ValueError(
+                    f"Empty slice [{start}:{stop}] for dimension {full}")
             return (start, stop)
         else:
-            raise TypeError(f"NodeRef indices must be integers or slices, got {type(key).__name__}")
+            raise TypeError(
+                f"NodeRef indices must be integers or slices, got {type(key).__name__}")
 
     def __getitem__(self, key):
         if self.slice_bounds is not None:
             raise ValueError("Cannot slice an already-sliced NodeRef")
         start, stop = self._parse_key(key)
-        return NodeRef(self.owner, self.node_type, self.owner_type, slice_bounds=(start, stop))
+        return NodeRef(self.owner, self.node_type, self.owner_type,
+                       slice_bounds=(start, stop))
 
     def __repr__(self):
-        if self.owner_type == "layer":
+        if self.owner_type == 'layer':
             label = self.owner.label or f"layer_{self.owner._idx}"
         else:
             label = f"predict_{self.owner._idx}"
@@ -146,7 +151,8 @@ class NodeRef:
 
 
 class Layer:
-    """A layer in the predictive coding network.
+    """
+    A layer in the predictive coding network.
 
     Each layer has:
         - value: Current activity/representation (batch, dim)
@@ -167,7 +173,6 @@ class Layer:
     After build():
         _idx: Index in the network's layer list
         _network: Reference to parent PCNetwork
-
     """
 
     def __init__(
@@ -179,11 +184,10 @@ class Layer:
         inference_reg=None,
         train_reg=None,
         dropout_prob: float = 0.0,
-        label: str | None = None,
+        label: Optional[str] = None
     ):
-        from .activations import activation_from_name
         from .network import _get_current_network
-
+        from .activations import activation_from_name
         net = _get_current_network()
         defaults = net._defaults
 
@@ -192,17 +196,11 @@ class Layer:
         if activation is not _DEFAULT:
             self.activation = activation
         else:
-            act = defaults["activation"]
+            act = defaults['activation']
             self.activation = activation_from_name(act) if isinstance(act, str) else act
 
-        self.dynamics_rate = (
-            dynamics_rate if dynamics_rate is not _DEFAULT else defaults["dynamics_rate"]
-        )
-        self.spatial_structure = (
-            spatial_structure
-            if spatial_structure is not _DEFAULT
-            else defaults.get("spatial_structure", "none")
-        )
+        self.dynamics_rate = dynamics_rate if dynamics_rate is not _DEFAULT else defaults['dynamics_rate']
+        self.spatial_structure = spatial_structure if spatial_structure is not _DEFAULT else defaults.get('spatial_structure', 'none')
         self.inference_reg = inference_reg
         self.train_reg = train_reg
         # Per-layer dropout probability applied to the *activated value* before
@@ -220,8 +218,8 @@ class Layer:
         self.locations = None
         self.neighborhood = None
 
-        self._idx: int | None = None
-        self._network: PCNetwork | None = None
+        self._idx: Optional[int] = None
+        self._network: Optional['PCNetwork'] = None
 
         # Register with current network context
         net._add_layer(self)
@@ -229,7 +227,7 @@ class Layer:
     @property
     def value(self) -> NodeRef:
         """Reference to this layer's value node."""
-        return NodeRef(self, "value", owner_type="layer")
+        return NodeRef(self, 'value', owner_type='layer')
 
     @property
     def f(self) -> Activation:

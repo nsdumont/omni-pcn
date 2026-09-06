@@ -1,4 +1,5 @@
-"""PCN: Predictive Coding Networks.
+"""
+PCN: Predictive Coding Networks
 
 A JAX-based Python package for defining, simulating, and training
 predictive coding networks on graphs.
@@ -47,169 +48,129 @@ Learning Rules:
 __version__ = "0.1.0"
 
 # Core classes
-# Submodules
-from . import backend, core
-from .backprop_simulation import BackpropSimulation
-from .bptt_simulation import BPTTSimulation
+from .core.network import PCNetwork
+from .core.layer import Layer, NodeRef
+from .core.connections import Predict, PredictRes, PredictConv, PredictConvPool, PredictTransConv, Project, Modulate
+from .core.memory import Memory
+from .core.sensory import (
+    SensoryTransform, Sequential, SensoryInput, VisualInput, AuditoryInput,
+    DoGCenterSurround, DivisiveNormalization, GaborBank, ComplexEnergy,
+    ColorOpponent, GaussianBlur, SpatialPool, ChannelStandardize,
+    ChannelSelect, ParallelPathways,
+    MelPower, PowerCompression, LateralInhibition, LeakyIntegrator, STRFBank,
+)
+from .core.activations import (
+    Activation, Direct, Relu, ThresholdRelu, Softmax, Tanh, HardTanh, Sigmoid, LeakyRelu, Gelu, Elu,
+    LayerNorm, NWTA, Poisson, MemoryActivation, Leaky, StochasticActivation, Stochastic, BatchStandardize,
+)
+from .core.learning_rules import LearningRule, Hebbian, Oja, ThreeFactorHebbian, GradientDescent, NoLearning
+from .core.state import NetworkState, NetworkParams
+from .core.sparse import SparseWeight
+from .core.structure import NetworkStructure
+from .core.regularization import L1Norm, L2Norm, UnitNorm, SIGReg, SupConLoss, SumReg
 
 # Configuration
 from .config import load_config
-from .core.activations import (
-    ACTIVATION_REGISTRY,
-    NWTA,
-    Activation,
-    Direct,
-    Elu,
-    Gelu,
-    HardTanh,
-    LayerNorm,
-    Leaky,
-    LeakyRelu,
-    MemoryActivation,
-    Poisson,
-    Relu,
-    Sigmoid,
-    Softmax,
-    Stochastic,
-    StochasticActivation,
-    Tanh,
-    activation_from_name,
-)
-from .core.connections import (
-    Modulate,
-    Predict,
-    PredictConv,
-    PredictConvPool,
-    PredictRes,
-    PredictTransConv,
-    Project,
-)
-from .core.layer import Layer, NodeRef
-from .core.learning_rules import (
-    GradientDescent,
-    Hebbian,
-    LearningRule,
-    NoLearning,
-    Oja,
-    ThreeFactorHebbian,
-)
-from .core.memory import Memory
-from .core.network import PCNetwork
-
-# Optimizers
-from .core.optimizers import natural_gradient_precision
-from .core.regularization import L1Norm, L2Norm, SIGReg, SumReg, SupConLoss, UnitNorm
-from .core.sensory import (
-    AuditoryInput,
-    ChannelSelect,
-    ChannelStandardize,
-    ColorOpponent,
-    ComplexEnergy,
-    DivisiveNormalization,
-    DoGCenterSurround,
-    GaborBank,
-    GaussianBlur,
-    LateralInhibition,
-    LeakyIntegrator,
-    MelPower,
-    ParallelPathways,
-    PowerCompression,
-    SensoryInput,
-    SensoryTransform,
-    Sequential,
-    SpatialPool,
-    STRFBank,
-    VisualInput,
-)
-from .core.state import NetworkParams, NetworkState
-from .core.structure import NetworkStructure
+from .core.activations import activation_from_name, ACTIVATION_REGISTRY
 
 # High-level API
 from .simulation import Simulation
+from .backprop_simulation import BackpropSimulation
+from .bptt_simulation import BPTTSimulation
+
+# Optimizers
+from .core.optimizers import natural_gradient_precision
+
+# Submodules
+from . import core
+from . import backend
 
 __all__ = [
     # Version
-    "__version__",
+    '__version__',
     # Core classes
-    "PCNetwork",
-    "Layer",
-    "NodeRef",
-    "Predict",
-    "PredictRes",
-    "PredictConv",
-    "PredictConvPool",
-    "PredictTransConv",
-    "Project",
-    "Modulate",
-    "Memory",
+    'PCNetwork',
+    'Layer',
+    'NodeRef',
+    'Predict',
+    'PredictRes',
+    'PredictConv',
+    'PredictConvPool',
+    'PredictTransConv',
+    'Project',
+    'Modulate',
+    'Memory',
     # Sensory front-ends
-    "SensoryTransform",
-    "Sequential",
-    "SensoryInput",
-    "VisualInput",
-    "AuditoryInput",
-    "DoGCenterSurround",
-    "DivisiveNormalization",
-    "GaborBank",
-    "ComplexEnergy",
-    "ColorOpponent",
-    "GaussianBlur",
-    "SpatialPool",
-    "ChannelStandardize",
-    "ChannelSelect",
-    "ParallelPathways",
-    "MelPower",
-    "PowerCompression",
-    "LateralInhibition",
-    "LeakyIntegrator",
-    "STRFBank",
+    'SensoryTransform',
+    'Sequential',
+    'SensoryInput',
+    'VisualInput',
+    'AuditoryInput',
+    'DoGCenterSurround',
+    'DivisiveNormalization',
+    'GaborBank',
+    'ComplexEnergy',
+    'ColorOpponent',
+    'GaussianBlur',
+    'SpatialPool',
+    'ChannelStandardize',
+    'ChannelSelect',
+    'ParallelPathways',
+    'MelPower',
+    'PowerCompression',
+    'LateralInhibition',
+    'LeakyIntegrator',
+    'STRFBank',
     # Activations
-    "Activation",
-    "Direct",
-    "Relu",
-    "Softmax",
-    "Tanh",
-    "HardTanh",
-    "Sigmoid",
-    "LeakyRelu",
-    "Gelu",
-    "LayerNorm",
-    "NWTA",
-    "Elu",
-    "Poisson",
-    "MemoryActivation",
-    "Leaky",
-    "StochasticActivation",
-    "Stochastic",
+    'Activation',
+    'Direct',
+    'Relu',
+    'ThresholdRelu',
+    'Softmax',
+    'Tanh',
+    'HardTanh',
+    'Sigmoid',
+    'LeakyRelu',
+    'Gelu',
+    'LayerNorm',
+    'BatchStandardize',
+    'NWTA',
+    'Elu',
+    'Poisson',
+    'MemoryActivation',
+    'Leaky',
+    'StochasticActivation',
+    'Stochastic',
     # Regularization
-    "L1Norm",
-    "L2Norm",
-    "UnitNorm",
-    "SIGReg",
-    "SupConLoss",
-    "SumReg",
+    'L1Norm',
+    'L2Norm',
+    'UnitNorm',
+    'SIGReg',
+    'SupConLoss',
+    'SumReg',
     # Learning rules
-    "LearningRule",
-    "Hebbian",
-    "Oja",
-    "ThreeFactorHebbian",
-    "GradientDescent",
-    "NoLearning",
+    'LearningRule',
+    'Hebbian',
+    'Oja',
+    'ThreeFactorHebbian',
+    'GradientDescent',
+    'NoLearning',
     # State and structure
-    "NetworkState",
-    "NetworkParams",
-    "NetworkStructure",
+    'NetworkState',
+    'NetworkParams',
+    'NetworkStructure',
+    'SparseWeight',
     # Configuration
-    "load_config",
-    "activation_from_name",
-    "ACTIVATION_REGISTRY",
+    'load_config',
+    'activation_from_name',
+    'ACTIVATION_REGISTRY',
     # High-level API
-    "Simulation",
-    "BackpropSimulation",
-    "BPTTSimulation",
+    'Simulation',
+    'BackpropSimulation',
+    'BPTTSimulation',
     # Optimizers
-    "natural_gradient_precision",
+    'natural_gradient_precision',
     # Submodules
-    "core",
-    "backend",
+    'core',
+    'backend',
 ]

@@ -1,4 +1,5 @@
-"""Consolidated PCN simulation backend.
+"""
+Consolidated PCN simulation backend.
 
 Single module with one main function that handles:
 - State initialization
@@ -10,25 +11,27 @@ Single module with one main function that handles:
 Optimized for speed with minimal Python overhead.
 """
 
-from typing import Any
-
+from typing import Dict, Tuple, List, Optional, Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
 from jax import lax
 
-from ..core.activations import ACTIVATIONS, _nwta  # re-exported for back-compat
-from ..core.network import _make_band_mask
-from ..core.state import NetworkParams
 from ..core.structure import NetworkStructure
+from ..core.learning_rules import Hebbian, ThreeFactorHebbian
+from ..core.state import NetworkState, NetworkParams
+from ..core.network import _make_band_mask
+from ..core.sparse import SparseWeight, sampled_outer, learnable_leaf, rebuild_weight
+from ..core.activations import ACTIVATIONS, _nwta  # re-exported for back-compat
+
 
 # ============================================================================
 # Memory-aware error activation dispatch
 # ============================================================================
 
-
-def _activated_error(predict_error_activations, conn, i, residual, prev_error, key=None):
+def _activated_error(predict_error_activations, conn, i, residual, prev_error,
+                     key=None):
     """Apply the error activation for predict-conn ``i`` to a raw residual.
 
     If a memory-aware activation is supplied for that conn, it is given the
@@ -50,9 +53,8 @@ def _activated_error(predict_error_activations, conn, i, residual, prev_error, k
     return conn.error_transform(residual)
 
 
-def _activated_precision(
-    predict_precision_activations, conn, i, log_prec, prev_precision, key=None
-):
+def _activated_precision(predict_precision_activations, conn, i, log_prec,
+                         prev_precision, key=None):
     """Apply the precision activation for predict-conn ``i`` to log-precision.
 
     Mirrors :func:`_activated_error`. For memory-aware activations, the
@@ -75,9 +77,9 @@ def _activated_precision(
     return conn.precision_transform(log_prec)
 
 
-def _add_prediction_noise(
-    conn, i, prediction, prec_in, precision_weights, precision_bias, is_stochastic, key
-):
+def _add_prediction_noise(conn, i, prediction, prec_in,
+                          precision_weights, precision_bias,
+                          is_stochastic, key):
     """Add precision-scaled Gaussian noise to a prediction (is_stochastic).
 
     The noise is ``eps / sqrt(precision)`` with ``eps ~ N(0, I)`` and the
@@ -99,7 +101,7 @@ def _add_prediction_noise(
     (variance ∝ T), the Langevin temperature knob. ``T>1`` heats the sampler so
     a strong generator explores within-class exemplars; ``T<1`` cools it.
     """
-    if not is_stochastic or key is None or not getattr(conn, "stochastic", True):
+    if not is_stochastic or key is None or not getattr(conn, 'stochastic', True):
         return prediction
     skey = jax.random.fold_in(key, i + 1000)
     eps = jax.random.normal(skey, prediction.shape)
@@ -112,7 +114,6 @@ def _add_prediction_noise(
 # Loss function helpers
 # ============================================================================
 
-
 def _gather_loss_fn_args(resolved_inputs, node_arrays, sample_arrays):
     """Gather arrays for a loss function from nodes and sample dict.
 
@@ -124,9 +125,7 @@ def _gather_loss_fn_args(resolved_inputs, node_arrays, sample_arrays):
 
     Returns:
         List of arrays to pass as positional args.
-
     """
-
     def _get_one(elem):
         if isinstance(elem, str):
             return sample_arrays[elem]
@@ -136,11 +135,7 @@ def _gather_loss_fn_args(resolved_inputs, node_arrays, sample_arrays):
 
     if isinstance(resolved_inputs, str):
         return [sample_arrays[resolved_inputs]]
-    elif (
-        isinstance(resolved_inputs, tuple)
-        and len(resolved_inputs) == 2
-        and isinstance(resolved_inputs[0], int)
-    ):
+    elif isinstance(resolved_inputs, tuple) and len(resolved_inputs) == 2 and isinstance(resolved_inputs[0], int):
         # Single node ref: (node_type, idx)
         node_type, idx = resolved_inputs
         return [node_arrays[node_type][idx]]
@@ -154,7 +149,6 @@ def _gather_loss_fn_args(resolved_inputs, node_arrays, sample_arrays):
 # Sliced write-back helpers
 # ============================================================================
 
-
 def _apply_mask(mask, original, updated):
     """Soft-clamp blend: mask=1 → original, mask=0 → updated, intermediate → linear mix."""
     return mask * original + (1 - mask) * updated
@@ -163,22 +157,21 @@ def _apply_mask(mask, original, updated):
 def _write_additive(arr, contribution, post_slice):
     """Add contribution to arr, potentially to a slice of dimensions."""
     if post_slice:
-        return arr.at[:, post_slice[0] : post_slice[1]].add(contribution)
+        return arr.at[:, post_slice[0]:post_slice[1]].add(contribution)
     return arr + contribution
 
 
 def _write_multiplicative(arr, modulation, post_slice):
     """Multiply arr by modulation, potentially on a slice of dimensions."""
     if post_slice:
-        sliced = arr[:, post_slice[0] : post_slice[1]]
-        return arr.at[:, post_slice[0] : post_slice[1]].set(sliced * modulation)
+        sliced = arr[:, post_slice[0]:post_slice[1]]
+        return arr.at[:, post_slice[0]:post_slice[1]].set(sliced * modulation)
     return arr * modulation
 
 
 # ============================================================================
 # Temporal-delay history buffers (Phase 1: value pre nodes)
 # ============================================================================
-
 
 def _read_delayed(hist, buf_idx, delay, unit_ts, tick_base, i, ipt):
     """Read a value ``delay`` steps back from its history ring buffer.
@@ -209,15 +202,8 @@ def _delayed_srcs(conn, hist, tick_base, iter_idx, ipt):
     if conn.delay == 0 or not hist:
         return None
     return [
-        _read_delayed(
-            hist,
-            conn.pre_buffer_indices[k],
-            conn.delay,
-            conn.delay_unit_ts,
-            tick_base,
-            iter_idx,
-            ipt,
-        )
+        _read_delayed(hist, conn.pre_buffer_indices[k], conn.delay,
+                      conn.delay_unit_ts, tick_base, iter_idx, ipt)
         for k in range(len(conn.pre_idx))
     ]
 
@@ -226,22 +212,16 @@ def _delayed_srcs(conn, hist, tick_base, iter_idx, ipt):
 # Project / Modulate helpers
 # ============================================================================
 
-
 def _apply_project_modulate_internal(
-    errors,
-    values,
-    project_weights,
-    modulate_weights,
-    project_conns_internal,
-    modulate_conns_internal,
+    errors, values,
+    project_weights, modulate_weights,
+    project_conns_internal, modulate_conns_internal,
     activation_fns,
     precisions=(),
     project_biases=(),
     modulate_biases=(),
-    hist=(),
-    tick_base=0,
-    iter_idx=0,
-    iters_per_timestep=1,
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
+    update_other_params: bool = True,
 ):
     """Apply Project (additive) then Modulate (multiplicative) to errors.
 
@@ -257,38 +237,33 @@ def _apply_project_modulate_internal(
 
     for weight_idx, conn in project_conns_internal:
         dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
-        pre_act = conn.get_pre(
-            values, errors, activation_fns, precisions=precisions, delayed_srcs=dsrc
-        )
+        pre_act = conn.get_pre(values, errors, activation_fns,
+                               precisions=precisions, delayed_srcs=dsrc)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
-        contribution = (
-            conn.apply(jax.lax.stop_gradient(pre_act), project_weights[weight_idx]) + p_bias
-        )
+        contribution = conn.apply(
+            jax.lax.stop_gradient(pre_act),
+            project_weights[weight_idx]) + p_bias
         new_errors[conn.post_idx] = _write_additive(
-            new_errors[conn.post_idx], contribution, conn.post_slice
-        )
+            new_errors[conn.post_idx], contribution, conn.post_slice)
 
     for weight_idx, conn in modulate_conns_internal:
         dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
-        pre_act = conn.get_pre(
-            values, tuple(new_errors), activation_fns, precisions=precisions, delayed_srcs=dsrc
-        )
+        pre_act = conn.get_pre(values, tuple(new_errors), activation_fns,
+                               precisions=precisions, delayed_srcs=dsrc)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
-        modulation = conn.apply(jax.lax.stop_gradient(pre_act), modulate_weights[weight_idx]) + bias
+        modulation = conn.apply(
+            jax.lax.stop_gradient(pre_act),
+            modulate_weights[weight_idx]) + bias
         new_errors[conn.post_idx] = _write_multiplicative(
-            new_errors[conn.post_idx], modulation, conn.post_slice
-        )
+            new_errors[conn.post_idx], modulation, conn.post_slice)
 
     return tuple(new_errors)
 
 
 def _apply_project_modulate_internal_for_loss(
-    errors,
-    values,
-    project_weights,
-    modulate_weights,
-    project_conns_internal,
-    modulate_conns_internal,
+    errors, values,
+    project_weights, modulate_weights,
+    project_conns_internal, modulate_conns_internal,
     activation_fns,
     precisions=(),
     project_biases=(),
@@ -306,37 +281,29 @@ def _apply_project_modulate_internal_for_loss(
         p_bias = project_biases[weight_idx] if project_biases else 0.0
         contribution = conn.apply(pre_act, project_weights[weight_idx]) + p_bias
         new_errors[conn.post_idx] = _write_additive(
-            new_errors[conn.post_idx], contribution, conn.post_slice
-        )
+            new_errors[conn.post_idx], contribution, conn.post_slice)
 
     for weight_idx, conn in modulate_conns_internal:
         pre_act = conn.get_pre(values, tuple(new_errors), activation_fns, precisions=precisions)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
         modulation = conn.apply(pre_act, modulate_weights[weight_idx]) + bias
         new_errors[conn.post_idx] = _write_multiplicative(
-            new_errors[conn.post_idx], modulation, conn.post_slice
-        )
+            new_errors[conn.post_idx], modulation, conn.post_slice)
 
     return tuple(new_errors)
 
 
 def _apply_project_modulate_values(
-    values,
-    errors,
-    project_weights,
-    modulate_weights,
-    project_conns_value,
-    modulate_conns_value,
-    activation_fns,
-    clamped,
+    values, errors,
+    project_weights, modulate_weights,
+    project_conns_value, modulate_conns_value,
+    activation_fns, clamped,
     project_biases=(),
     modulate_biases=(),
     read_values=None,
     is_boundary=None,
-    hist=(),
-    tick_base=0,
-    iter_idx=0,
-    iters_per_timestep=1,
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
+    precisions=(),
 ):
     """Apply Project (additive) then Modulate (multiplicative) targeting values.
 
@@ -382,44 +349,43 @@ def _apply_project_modulate_values(
 
     for weight_idx, conn in project_conns_value:
         dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
-        pre_act = conn.get_pre(read_src, errors, activation_fns, delayed_srcs=dsrc)
+        pre_act = conn.get_pre(read_src, errors, activation_fns,
+                               precisions=precisions, delayed_srcs=dsrc)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
         contribution = conn.apply(pre_act, project_weights[weight_idx]) + p_bias
-        if gate_bool is not None and getattr(conn, "advance_timestep", False):
+        if gate_bool is not None and getattr(conn, 'advance_timestep', False):
             # Off boundary the additive contribution is zeroed out.
             contribution = contribution * gate_bool.astype(contribution.dtype)
         new_values[conn.post_idx] = _write_additive(
-            new_values[conn.post_idx], contribution, conn.post_slice
-        )
+            new_values[conn.post_idx], contribution, conn.post_slice)
 
     for weight_idx, conn in modulate_conns_value:
         dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
-        pre_act = conn.get_pre(read_src, errors, activation_fns, delayed_srcs=dsrc)
+        pre_act = conn.get_pre(read_src, errors, activation_fns,
+                               precisions=precisions, delayed_srcs=dsrc)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
         modulation = conn.apply(pre_act, modulate_weights[weight_idx]) + bias
-        if gate_bool is not None and getattr(conn, "advance_timestep", False):
+        if gate_bool is not None and getattr(conn, 'advance_timestep', False):
             # Off boundary the factor must be the IDENTITY, not zero.
-            modulation = jnp.where(gate_bool, modulation, jnp.ones_like(modulation))
+            modulation = jnp.where(gate_bool, modulation,
+                                   jnp.ones_like(modulation))
         new_values[conn.post_idx] = _write_multiplicative(
-            new_values[conn.post_idx], modulation, conn.post_slice
-        )
+            new_values[conn.post_idx], modulation, conn.post_slice)
 
     # Re-apply clamping (soft blend)
     return tuple(
-        _apply_mask(clamped[j], original_values[j], new_values[j]) for j in range(len(values))
-    )
+        _apply_mask(clamped[j], original_values[j], new_values[j])
+        for j in range(len(values)))
 
 
 def _apply_project_modulate_values_in_energy(
-    values,
-    prev_errors,
-    project_weights,
-    modulate_weights,
-    project_conns_value,
-    modulate_conns_value,
+    values, prev_errors,
+    project_weights, modulate_weights,
+    project_conns_value, modulate_conns_value,
     activation_fns,
     project_biases=(),
     modulate_biases=(),
+    precisions=(),
 ):
     """Apply value-targeting Project/Modulate inside the energy function.
 
@@ -430,36 +396,36 @@ def _apply_project_modulate_values_in_energy(
     new_values = list(values)
 
     for weight_idx, conn in project_conns_value:
-        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns)
+        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns,
+                               precisions=precisions)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
         new_values[conn.post_idx] = _write_additive(
             new_values[conn.post_idx],
-            conn.apply(jax.lax.stop_gradient(pre_act), project_weights[weight_idx]) + p_bias,
-            conn.post_slice,
-        )
+            conn.apply(jax.lax.stop_gradient(pre_act),
+                       project_weights[weight_idx]) + p_bias,
+            conn.post_slice)
 
     for weight_idx, conn in modulate_conns_value:
-        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns)
+        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns,
+                               precisions=precisions)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
         new_values[conn.post_idx] = _write_multiplicative(
             new_values[conn.post_idx],
-            conn.apply(jax.lax.stop_gradient(pre_act), modulate_weights[weight_idx]) + bias,
-            conn.post_slice,
-        )
+            conn.apply(jax.lax.stop_gradient(pre_act),
+                       modulate_weights[weight_idx]) + bias,
+            conn.post_slice)
 
     return tuple(new_values)
 
 
 def _apply_project_modulate_values_for_loss(
-    values,
-    prev_errors,
-    project_weights,
-    modulate_weights,
-    project_conns_value,
-    modulate_conns_value,
+    values, prev_errors,
+    project_weights, modulate_weights,
+    project_conns_value, modulate_conns_value,
     activation_fns,
     project_biases=(),
     modulate_biases=(),
+    precisions=(),
 ):
     """Apply value-targeting Project/Modulate with full gradient flow.
 
@@ -470,41 +436,34 @@ def _apply_project_modulate_values_for_loss(
     new_values = list(values)
 
     for weight_idx, conn in project_conns_value:
-        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns)
+        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns,
+                               precisions=precisions)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
         new_values[conn.post_idx] = _write_additive(
             new_values[conn.post_idx],
             conn.apply(pre_act, project_weights[weight_idx]) + p_bias,
-            conn.post_slice,
-        )
+            conn.post_slice)
 
     for weight_idx, conn in modulate_conns_value:
-        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns)
+        pre_act = conn.get_pre(tuple(new_values), prev_errors, activation_fns,
+                               precisions=precisions)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
         new_values[conn.post_idx] = _write_multiplicative(
             new_values[conn.post_idx],
             conn.apply(pre_act, modulate_weights[weight_idx]) + bias,
-            conn.post_slice,
-        )
+            conn.post_slice)
 
     return tuple(new_values)
 
 
 def _apply_project_modulate_precision(
-    precisions,
-    values,
-    errors,
-    project_weights,
-    modulate_weights,
-    project_conns_precision,
-    modulate_conns_precision,
+    precisions, values, errors,
+    project_weights, modulate_weights,
+    project_conns_precision, modulate_conns_precision,
     activation_fns,
     project_biases=(),
     modulate_biases=(),
-    hist=(),
-    tick_base=0,
-    iter_idx=0,
-    iters_per_timestep=1,
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
 ):
     """Apply Project (additive) then Modulate (multiplicative) to precisions.
 
@@ -522,26 +481,26 @@ def _apply_project_modulate_precision(
     for weight_idx, conn in project_conns_precision:
         dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
         pre_act = conn.get_pre(
-            values, errors, activation_fns, precisions=tuple(new_precisions), delayed_srcs=dsrc
-        )
+            values, errors, activation_fns, precisions=tuple(new_precisions),
+            delayed_srcs=dsrc)
         p_bias = project_biases[weight_idx] if project_biases else 0.0
-        contribution = (
-            conn.apply(jax.lax.stop_gradient(pre_act), project_weights[weight_idx]) + p_bias
-        )
+        contribution = conn.apply(
+            jax.lax.stop_gradient(pre_act),
+            project_weights[weight_idx]) + p_bias
         new_precisions[conn.post_idx] = _write_additive(
-            new_precisions[conn.post_idx], contribution, conn.post_slice
-        )
+            new_precisions[conn.post_idx], contribution, conn.post_slice)
 
     for weight_idx, conn in modulate_conns_precision:
         dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
         pre_act = conn.get_pre(
-            values, errors, activation_fns, precisions=tuple(new_precisions), delayed_srcs=dsrc
-        )
+            values, errors, activation_fns, precisions=tuple(new_precisions),
+            delayed_srcs=dsrc)
         bias = modulate_biases[weight_idx] if modulate_biases else 0.0
-        modulation = conn.apply(jax.lax.stop_gradient(pre_act), modulate_weights[weight_idx]) + bias
+        modulation = conn.apply(
+            jax.lax.stop_gradient(pre_act),
+            modulate_weights[weight_idx]) + bias
         new_precisions[conn.post_idx] = _write_multiplicative(
-            new_precisions[conn.post_idx], modulation, conn.post_slice
-        )
+            new_precisions[conn.post_idx], modulation, conn.post_slice)
 
     return tuple(new_precisions)
 
@@ -579,13 +538,13 @@ def _combined_step(
     gd_loss_modulate: tuple = (),
     reward_fns: tuple = (),
     loss_fns: tuple = (),
-    loss_fn_sample_arrays: dict = None,
-    spatial_layers: tuple = (),  # TODO: no longer used
+    loss_fn_sample_arrays: dict = {},
+    spatial_layers: tuple = (), #TODO: no longer used
     spatial_neighborhoods: tuple = (),
     inference_regs: tuple = (),
     train_regs: tuple = (),
-    key=None,
-    labels=None,
+    key = None,
+    labels = None,
     update_precision: bool = True,
     is_stochastic: bool = False,
     # Mechanism 1: precision-targeting Project/Modulate
@@ -623,11 +582,7 @@ def _combined_step(
     # feature (delay==0 path is bit-identical). tick_base offsets the learning
     # loop by n_iterations; iter_idx is the loop tracer; iters_per_timestep (ipt)
     # scales latched reads.
-    hist=(),
-    tick_base=0,
-    iter_idx=0,
-    iters_per_timestep=1,
-    update_other_params: bool = True,
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
 ) -> tuple:
     """Combined inference + learning step.
 
@@ -660,10 +615,7 @@ def _combined_step(
          new_modulate_weights, new_modulate_biases,
          new_ppw, new_ppb,
          new_values_opt_state, new_params_opt_state)
-
     """
-    if loss_fn_sample_arrays is None:
-        loss_fn_sample_arrays = {}
     n_layers = len(values)
     batch_size = values[0].shape[0]
     n_pc_conn = len(predict_conns)
@@ -671,23 +623,26 @@ def _combined_step(
     # Trainable dict: predict/precision params + GD-loss project/modulate weights
     # plus project/modulate biases (frozen via stop_gradient when has_bias=False)
     trainable = {
-        "predict_weights": predict_weights,
-        "predict_biases": predict_biases,
-        "project_biases": project_biases,
-        "modulate_biases": modulate_biases,
-        "precision_weights": precision_weights,
-        "precision_biases": precision_biases,
-        "gd_loss_project_weights": tuple(project_weights[idx] for idx, _ in gd_loss_project),
-        "gd_loss_modulate_weights": tuple(modulate_weights[idx] for idx, _ in gd_loss_modulate),
+        'predict_weights': tuple(learnable_leaf(w) for w in predict_weights),
+        'predict_biases': predict_biases,
+        'project_biases': project_biases,
+        'modulate_biases': modulate_biases,
+        'precision_weights': precision_weights,
+        'precision_biases': precision_biases,
+        'gd_loss_project_weights': tuple(learnable_leaf(project_weights[idx]) for idx, _ in gd_loss_project),
+        'gd_loss_modulate_weights': tuple(learnable_leaf(modulate_weights[idx]) for idx, _ in gd_loss_modulate),
     }
 
     def energy_with_aux(vals, params):
-        pw = params["predict_weights"]
-        pb = params["predict_biases"]
-        proj_b_in = params["project_biases"]
-        mod_b_in = params["modulate_biases"]
-        ppw = params["precision_weights"]
-        ppb = params["precision_biases"]
+        # Sparse conns: re-attach the (traced) CSR/CSC structure to the
+        # learnable data leaf optax sees.
+        pw = tuple(rebuild_weight(o, l)
+                   for o, l in zip(predict_weights, params['predict_weights']))
+        pb = params['predict_biases']
+        proj_b_in = params['project_biases']
+        mod_b_in = params['modulate_biases']
+        ppw = params['precision_weights']
+        ppb = params['precision_biases']
 
         # Stop gradient on biases for connections without use_bias (dummy zeros)
         proj_b = tuple(
@@ -714,32 +669,33 @@ def _combined_step(
         # 1b. Compute per-leg flow gates (Mechanism 2)
         flow_gates_pre = []
         flow_gates_post = []
-        for conn in predict_conns:
+        for i, conn in enumerate(predict_conns):
             post_dim = mod_vals[conn.post_idx].shape[-1]
             flow_gates_pre.append(jnp.ones((batch_size, post_dim)))
             flow_gates_post.append(jnp.ones((batch_size, post_dim)))
         for weight_idx, mc in modulate_conns_flow_pre:
             pre_act = mc.get_pre(mod_vals, prev_errors, activation_fns)
-            gate = mc.apply(jax.lax.stop_gradient(pre_act), sg_mod_w[weight_idx])
+            gate = mc.apply(
+                jax.lax.stop_gradient(pre_act), sg_mod_w[weight_idx])
             flow_gates_pre[mc.post_idx] = flow_gates_pre[mc.post_idx] * gate
         for weight_idx, mc in modulate_conns_flow_post:
             pre_act = mc.get_pre(mod_vals, prev_errors, activation_fns)
-            gate = mc.apply(jax.lax.stop_gradient(pre_act), sg_mod_w[weight_idx])
+            gate = mc.apply(
+                jax.lax.stop_gradient(pre_act), sg_mod_w[weight_idx])
             flow_gates_post[mc.post_idx] = flow_gates_post[mc.post_idx] * gate
         flow_gates_pre = tuple(flow_gates_pre)
         flow_gates_post = tuple(flow_gates_post)
 
         # 2. Compute predictions, errors, precisions from mod_vals
-        E = 0.0
+        E = 0.
         all_errors = []
         all_precisions = []
-        all_e_pre = []  # split errors for per-leg gating
+        all_e_pre = []   # split errors for per-leg gating
         all_e_post = []
         for i, conn in enumerate(predict_conns):
             dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
-            pre_act = conn.get_pre(
-                mod_vals, (), activation_fns, layer_activations, key, delayed_srcs=dsrc
-            )
+            pre_act = conn.get_pre(mod_vals, (), activation_fns,
+                                   layer_activations, key, delayed_srcs=dsrc)
 
             if conn.has_fixed_weights or not update_other_params:
                 pw_i = jax.lax.stop_gradient(pw[i])
@@ -747,9 +703,6 @@ def _combined_step(
             else:
                 pw_i = pw[i]
                 pb_i = pb[i] if conn.has_bias else jax.lax.stop_gradient(pb[i])
-            # Prediction-weight freezing and precision learning are independent.
-            # Precision is frozen during iterative joint-learning steps, then
-            # updated once by the precision-only call after the loop.
             _learn_ppw = conn.learn_precision_weights and update_precision
             _learn_ppb = conn.learn_precision_bias and update_precision
             ppw_i = ppw[i] if _learn_ppw else jax.lax.stop_gradient(ppw[i])
@@ -760,53 +713,36 @@ def _combined_step(
             # Precision input: pre_act by default; custom precision_input
             # sources read current values (live) / prev-iteration carries.
             prec_in = conn.get_precision_input(
-                pre_act,
-                mod_vals,
-                prev_errors,
-                prev_precisions,
-                activation_fns,
-                layer_activations,
-                key,
-            )
+                pre_act, mod_vals, prev_errors, prev_precisions,
+                activation_fns, layer_activations, key)
             prediction = _add_prediction_noise(
-                conn, i, prediction, prec_in, ppw_i, ppb_i, is_stochastic, key
-            )
+                conn, i, prediction, prec_in, ppw_i, ppb_i, is_stochastic, key)
             if conn.unit_precision:
-                precision = jnp.ones(
-                    (prediction.shape[0], 1), dtype=prediction.dtype
-                )  # provably 1.0 — see _inference_step
+                precision = jnp.ones((prediction.shape[0], 1), dtype=prediction.dtype)  # provably 1.0 — see _inference_step
             else:
                 log_prec = conn.log_precision_fn(prec_in, ppw_i, ppb_i)
                 prev_p_i = prev_precisions[i] if prev_precisions else None
                 precision = _activated_precision(
-                    predict_precision_activations, conn, i, log_prec, prev_p_i, key=key
-                )
+                    predict_precision_activations, conn, i, log_prec, prev_p_i,
+                    key=key)
             post_val = conn.get_post(mod_vals)
             prev_e_i = prev_errors[i] if prev_errors else None
             residual = _activated_error(
-                predict_error_activations, conn, i, post_val - prediction, prev_e_i, key=key
-            )
+                predict_error_activations, conn, i,
+                post_val - prediction, prev_e_i, key=key)
             all_errors.append(residual)
             all_precisions.append(precision)
 
             # Split errors for per-leg flow gating (Mechanism 2)
             if predict_has_flow_gates and predict_has_flow_gates[i]:
                 e_pre = _activated_error(
-                    predict_error_activations,
-                    conn,
-                    i,
-                    jax.lax.stop_gradient(post_val) - prediction,
-                    prev_e_i,
-                    key=key,
-                )
+                    predict_error_activations, conn, i,
+                    jax.lax.stop_gradient(post_val) - prediction, prev_e_i,
+                    key=key)
                 e_post = _activated_error(
-                    predict_error_activations,
-                    conn,
-                    i,
-                    post_val - jax.lax.stop_gradient(prediction),
-                    prev_e_i,
-                    key=key,
-                )
+                    predict_error_activations, conn, i,
+                    post_val - jax.lax.stop_gradient(prediction), prev_e_i,
+                    key=key)
                 all_e_pre.append(e_pre)
                 all_e_post.append(e_post)
             else:
@@ -815,39 +751,26 @@ def _combined_step(
 
         # 2b. Apply precision-targeting Project/Modulate (Mechanism 1)
         mod_precisions = _apply_project_modulate_precision(
-            tuple(all_precisions),
-            mod_vals,
-            tuple(all_errors),
-            sg_proj_w,
-            sg_mod_w,
-            project_conns_precision,
-            modulate_conns_precision,
+            tuple(all_precisions), mod_vals, tuple(all_errors),
+            sg_proj_w, sg_mod_w,
+            project_conns_precision, modulate_conns_precision,
             activation_fns,
             project_biases=proj_b,
             modulate_biases=mod_b,
-            hist=hist,
-            tick_base=tick_base,
-            iter_idx=iter_idx,
-            iters_per_timestep=iters_per_timestep,
-        )
+            hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+            iters_per_timestep=iters_per_timestep)
 
         # 3. Apply error-targeting Project/Modulate
         mod_errors = _apply_project_modulate_internal(
-            tuple(all_errors),
-            mod_vals,
-            sg_proj_w,
-            sg_mod_w,
-            project_conns_internal,
-            modulate_conns_internal,
+            tuple(all_errors), mod_vals,
+            sg_proj_w, sg_mod_w,
+            project_conns_internal, modulate_conns_internal,
             activation_fns,
             precisions=mod_precisions,
             project_biases=proj_b,
             modulate_biases=mod_b,
-            hist=hist,
-            tick_base=tick_base,
-            iter_idx=iter_idx,
-            iters_per_timestep=iters_per_timestep,
-        )
+            hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+            iters_per_timestep=iters_per_timestep)
 
         # 3b. Structural attention: softmax reweighting (Mechanism 3)
         if structural_attention_groups:
@@ -857,11 +780,14 @@ def _combined_step(
                 for idx in group.conn_indices:
                     e_i = mod_errors_list[idx]
                     p_i = mod_precisions[idx]
-                    neg_e = -0.5 * jnp.sum(p_i * e_i**2, axis=-1) / group.temperature
+                    neg_e = -0.5 * jnp.sum(
+                        p_i * e_i ** 2, axis=-1) / group.temperature
                     neg_energies.append(neg_e)
-                alphas = jax.nn.softmax(jnp.stack(neg_energies, axis=-1), axis=-1)
+                alphas = jax.nn.softmax(
+                    jnp.stack(neg_energies, axis=-1), axis=-1)
                 for k, idx in enumerate(group.conn_indices):
-                    mod_errors_list[idx] = mod_errors_list[idx] * alphas[:, k : k + 1]
+                    mod_errors_list[idx] = (
+                        mod_errors_list[idx] * alphas[:, k:k+1])
             mod_errors = tuple(mod_errors_list)
 
         # 4. Energy summation
@@ -869,20 +795,14 @@ def _combined_step(
             scale = pre_scales[i] if pre_scales else 1.0
             if predict_has_flow_gates and predict_has_flow_gates[i]:
                 # Split energy: independent per-leg gating
-                E = E + scale * 0.5 * jnp.sum(
-                    jnp.mean(
-                        mod_precisions[i] * flow_gates_pre[i] * all_e_pre[i] ** 2
-                        + mod_precisions[i] * flow_gates_post[i] * all_e_post[i] ** 2
-                        - jnp.log(mod_precisions[i]),
-                        axis=-1,
-                    )
-                )
+                E = E + scale * 0.5 * jnp.sum(jnp.mean(
+                    mod_precisions[i] * flow_gates_pre[i] * all_e_pre[i] ** 2
+                    + mod_precisions[i] * flow_gates_post[i] * all_e_post[i] ** 2
+                    - jnp.log(mod_precisions[i]), axis=-1))
             else:
                 E = E + scale * 0.5 * jnp.sum(
-                    jnp.mean(
-                        mod_precisions[i] * mod_errors[i] ** 2 - jnp.log(mod_precisions[i]), axis=-1
-                    )
-                )
+                    jnp.mean(mod_precisions[i] * mod_errors[i] ** 2
+                             - jnp.log(mod_precisions[i]), axis=-1))
 
         # Inference regularization
         for layer_idx, reg in inference_regs:
@@ -896,124 +816,94 @@ def _combined_step(
 
         return E, (mod_errors, tuple(mod_precisions), mod_vals)
 
-    (
-        (_, (pre_update_errors, pre_update_precisions, pre_update_mod_vals)),
-        (val_grads, param_grads),
-    ) = jax.value_and_grad(energy_with_aux, argnums=(0, 1), has_aux=True)(values, trainable)
+    (_, (pre_update_errors, pre_update_precisions, pre_update_mod_vals)), (val_grads, param_grads) = jax.value_and_grad(
+        energy_with_aux, argnums=(0, 1), has_aux=True)(values, trainable)
 
     # Scale param grads to mean-over-batch convention
     param_grads = jax.tree.map(lambda g: g / batch_size, param_grads)
 
     # Compute loss grads for GD-loss connections and merge before optimizer call
     if update_other_params and (gd_loss_project or gd_loss_modulate):
-        loss_gd_pw = tuple(project_weights[idx] for idx, _ in gd_loss_project)
-        loss_gd_mw = tuple(modulate_weights[idx] for idx, _ in gd_loss_modulate)
+        loss_gd_pw = tuple(learnable_leaf(project_weights[idx]) for idx, _ in gd_loss_project)
+        loss_gd_mw = tuple(learnable_leaf(modulate_weights[idx]) for idx, _ in gd_loss_modulate)
 
         def loss_objective(gd_pw_args, gd_mw_args):
             l_proj_w = list(project_weights)
             for k, (idx, _) in enumerate(gd_loss_project):
-                l_proj_w[idx] = gd_pw_args[k]
-            l_proj_w = tuple(
-                jax.lax.stop_gradient(w) if i not in {idx for idx, _ in gd_loss_project} else w
-                for i, w in enumerate(l_proj_w)
-            )
+                l_proj_w[idx] = rebuild_weight(project_weights[idx], gd_pw_args[k])
+            l_proj_w = tuple(jax.lax.stop_gradient(w) if i not in {idx for idx, _ in gd_loss_project} else w
+                             for i, w in enumerate(l_proj_w))
             l_mod_w = list(modulate_weights)
             for k, (idx, _) in enumerate(gd_loss_modulate):
-                l_mod_w[idx] = gd_mw_args[k]
-            l_mod_w = tuple(
-                jax.lax.stop_gradient(w) if i not in {idx for idx, _ in gd_loss_modulate} else w
-                for i, w in enumerate(l_mod_w)
-            )
+                l_mod_w[idx] = rebuild_weight(modulate_weights[idx], gd_mw_args[k])
+            l_mod_w = tuple(jax.lax.stop_gradient(w) if i not in {idx for idx, _ in gd_loss_modulate} else w
+                            for i, w in enumerate(l_mod_w))
 
             l_mod_vals = _apply_project_modulate_values_for_loss(
-                values,
-                prev_errors,
-                l_proj_w,
-                l_mod_w,
-                project_conns_value,
-                modulate_conns_value,
-                activation_fns,
+                values, prev_errors, l_proj_w, l_mod_w,
+                project_conns_value, modulate_conns_value, activation_fns,
                 project_biases=tuple(jax.lax.stop_gradient(b) for b in project_biases),
                 modulate_biases=tuple(jax.lax.stop_gradient(b) for b in modulate_biases),
-            )
+                precisions=pre_update_precisions)
 
             l_errors = []
             l_precisions = []
             for i, conn in enumerate(predict_conns):
-                pre_act = conn.get_pre(l_mod_vals, (), activation_fns, layer_activations, key)
+                pre_act = conn.get_pre(l_mod_vals, (), activation_fns,
+                                       layer_activations, key)
                 pre_value = conn.get_pre_value(l_mod_vals) if conn.is_res else None
                 prediction = conn.prediction(
-                    pre_act, predict_weights[i], predict_biases[i], pre_value
-                )
+                    pre_act, predict_weights[i], predict_biases[i], pre_value)
                 prev_e_i = prev_errors[i] if prev_errors else None
-                l_errors.append(
-                    _activated_error(
-                        predict_error_activations,
-                        conn,
-                        i,
-                        conn.get_post(l_mod_vals) - prediction,
-                        prev_e_i,
-                        key=key,
-                    )
-                )
+                l_errors.append(_activated_error(
+                    predict_error_activations, conn, i,
+                    conn.get_post(l_mod_vals) - prediction, prev_e_i, key=key))
                 l_prec_in = conn.get_precision_input(
-                    pre_act,
-                    l_mod_vals,
-                    prev_errors,
-                    prev_precisions,
-                    activation_fns,
-                    layer_activations,
-                    key,
-                )
+                    pre_act, l_mod_vals, prev_errors, prev_precisions,
+                    activation_fns, layer_activations, key)
                 l_log_prec = conn.log_precision_fn(
-                    l_prec_in, precision_weights[i], precision_biases[i]
-                )
+                    l_prec_in, precision_weights[i], precision_biases[i])
                 prev_p_i = prev_precisions[i] if prev_precisions else None
-                l_precisions.append(
-                    _activated_precision(
-                        predict_precision_activations, conn, i, l_log_prec, prev_p_i, key=key
-                    )
-                )
+                l_precisions.append(_activated_precision(
+                    predict_precision_activations, conn, i, l_log_prec, prev_p_i,
+                    key=key))
 
             l_mod_errors = _apply_project_modulate_internal_for_loss(
-                tuple(l_errors),
-                l_mod_vals,
-                l_proj_w,
-                l_mod_w,
-                project_conns_internal,
-                modulate_conns_internal,
-                activation_fns,
+                tuple(l_errors), l_mod_vals, l_proj_w, l_mod_w,
+                project_conns_internal, modulate_conns_internal, activation_fns,
                 precisions=tuple(l_precisions),
                 project_biases=tuple(jax.lax.stop_gradient(b) for b in project_biases),
-                modulate_biases=tuple(jax.lax.stop_gradient(b) for b in modulate_biases),
-            )
+                modulate_biases=tuple(jax.lax.stop_gradient(b) for b in modulate_biases))
 
             node_arrays = (l_mod_vals, tuple(l_mod_errors), tuple(l_precisions))
 
-            L = 0.0
+            L = 0.
             seen = set()
             for _, lfn_idx in list(gd_loss_project) + list(gd_loss_modulate):
                 if lfn_idx not in seen:
                     seen.add(lfn_idx)
                     resolved_inputs, fn = loss_fns[lfn_idx]
-                    args = _gather_loss_fn_args(resolved_inputs, node_arrays, loss_fn_sample_arrays)
+                    args = _gather_loss_fn_args(
+                        resolved_inputs, node_arrays, loss_fn_sample_arrays)
                     L = L + fn(*args)
             return L
 
-        gd_pw_grads, gd_mw_grads = jax.grad(loss_objective, argnums=(0, 1))(loss_gd_pw, loss_gd_mw)
+        gd_pw_grads, gd_mw_grads = jax.grad(
+            loss_objective, argnums=(0, 1))(loss_gd_pw, loss_gd_mw)
 
-        param_grads = {
-            **param_grads,
-            "gd_loss_project_weights": tuple(g / batch_size for g in gd_pw_grads),
-            "gd_loss_modulate_weights": tuple(g / batch_size for g in gd_mw_grads),
+        param_grads = {**param_grads,
+            'gd_loss_project_weights': tuple(g / batch_size for g in gd_pw_grads),
+            'gd_loss_modulate_weights': tuple(g / batch_size for g in gd_mw_grads),
         }
 
     # Apply values optimizer
     if update_other_params:
-        updates, new_values_opt_state = values_optimizer.update(val_grads, values_opt_state, values)
+        updates, new_values_opt_state = values_optimizer.update(
+            val_grads, values_opt_state, values)
         new_values_raw = optax.apply_updates(values, updates)
         new_values = tuple(
-            _apply_mask(clamped[j], values[j], new_values_raw[j]) for j in range(n_layers)
+            _apply_mask(clamped[j], values[j], new_values_raw[j])
+            for j in range(n_layers)
         )
     else:
         new_values_opt_state = values_opt_state
@@ -1025,27 +915,22 @@ def _combined_step(
     # state, so the energy step and routing both combine from v[t]. Re-clamps.
     if update_other_params:
         new_values = _apply_project_modulate_values(
-            new_values,
-            pre_update_errors,
-            project_weights,
-            modulate_weights,
-            project_conns_value,
-            modulate_conns_value,
-            activation_fns,
-            clamped,
-            project_biases=project_biases,
-            modulate_biases=modulate_biases,
-            read_values=values,
-            is_boundary=is_boundary,
-            hist=hist,
-            tick_base=tick_base,
-            iter_idx=iter_idx,
+            new_values, pre_update_errors,
+            project_weights, modulate_weights,
+            project_conns_value, modulate_conns_value,
+            activation_fns, clamped,
+            project_biases=project_biases, modulate_biases=modulate_biases,
+            read_values=values, is_boundary=is_boundary,
+            hist=hist, tick_base=tick_base, iter_idx=iter_idx,
             iters_per_timestep=iters_per_timestep,
-        )
+            precisions=pre_update_precisions)
 
     # Apply params optimizer
     if isinstance(params_optimizer, optax.GradientTransformationExtraArgs):
-        features = tuple(conn.get_pre(values, (), activation_fns) for conn in predict_conns)
+        features = tuple(
+            conn.get_pre(values, (), activation_fns)
+            for conn in predict_conns
+        )
         updates, new_params_opt_state = params_optimizer.update(
             param_grads, params_opt_state, trainable, features=features
         )
@@ -1056,12 +941,13 @@ def _combined_step(
     new_trainable = optax.apply_updates(trainable, updates)
 
     # Post-processing: restore fixed/non-learned predict params
-    new_pw = list(new_trainable["predict_weights"])
-    new_pb = list(new_trainable["predict_biases"])
-    new_ppw = list(new_trainable["precision_weights"])
-    new_ppb = list(new_trainable["precision_biases"])
-    new_proj_b = list(new_trainable["project_biases"])
-    new_mod_b = list(new_trainable["modulate_biases"])
+    new_pw = [rebuild_weight(o, l)
+              for o, l in zip(predict_weights, new_trainable['predict_weights'])]
+    new_pb = list(new_trainable['predict_biases'])
+    new_ppw = list(new_trainable['precision_weights'])
+    new_ppb = list(new_trainable['precision_biases'])
+    new_proj_b = list(new_trainable['project_biases'])
+    new_mod_b = list(new_trainable['modulate_biases'])
 
     for i, conn in enumerate(predict_conns):
         if conn.has_fixed_weights or not update_other_params:
@@ -1073,10 +959,11 @@ def _combined_step(
             new_ppw[i] = precision_weights[i]
         if not conn.learn_precision_bias:
             new_ppb[i] = precision_biases[i]
-        if conn.n_bands > 0:
+        # Sparse conns: the index set is the mask — nothing to re-apply.
+        if conn.n_bands > 0 and not conn.is_sparse:
             m, n = new_pw[i].shape
             new_pw[i] = new_pw[i] * _make_band_mask(m, n, conn.n_bands)
-        if conn.is_masked:
+        if conn.is_masked and not conn.is_sparse:
             new_pw[i] = new_pw[i] * predict_weight_masks[i]
 
     # Restore project/modulate biases for connections without use_bias
@@ -1091,18 +978,13 @@ def _combined_step(
     # 1) Hebbian/ThreeFactorHebbian — uses pre-update mod state
     if update_other_params:
         new_project_weights, new_modulate_weights = _learn_project_modulate_weights(
-            pre_update_mod_vals,
-            pre_update_errors,
-            project_weights,
-            modulate_weights,
-            project_conns,
-            modulate_conns,
-            activation_fns,
-            batch_size,
+            pre_update_mod_vals, pre_update_errors,
+            project_weights, modulate_weights,
+            project_conns, modulate_conns,
+            activation_fns, batch_size,
             reward_fns,
             precisions=pre_update_precisions,
-            reward_fn_sample_arrays=loss_fn_sample_arrays,
-        )
+            reward_fn_sample_arrays=loss_fn_sample_arrays)
     else:
         new_project_weights, new_modulate_weights = project_weights, modulate_weights
 
@@ -1111,22 +993,24 @@ def _combined_step(
     new_modulate_weights = list(new_modulate_weights)
     if update_other_params:
         for j, (idx, _) in enumerate(gd_loss_project):
-            new_project_weights[idx] = new_trainable["gd_loss_project_weights"][j]
+            new_project_weights[idx] = rebuild_weight(
+                project_weights[idx], new_trainable['gd_loss_project_weights'][j])
         for j, (idx, _) in enumerate(gd_loss_modulate):
-            new_modulate_weights[idx] = new_trainable["gd_loss_modulate_weights"][j]
+            new_modulate_weights[idx] = rebuild_weight(
+                modulate_weights[idx], new_trainable['gd_loss_modulate_weights'][j])
 
     # Re-mask banded / custom-masked project/modulate weights
     for i, conn in enumerate(project_conns):
-        if conn.n_bands > 0 and not (conn.is_conv or conn.is_transconv):
+        if conn.n_bands > 0 and not (conn.is_conv or conn.is_transconv or conn.is_sparse):
             m, n = new_project_weights[i].shape
             new_project_weights[i] = new_project_weights[i] * _make_band_mask(m, n, conn.n_bands)
-        if conn.is_masked:
+        if conn.is_masked and not conn.is_sparse:
             new_project_weights[i] = new_project_weights[i] * project_weight_masks[i]
     for i, conn in enumerate(modulate_conns):
-        if conn.n_bands > 0 and not (conn.is_conv or conn.is_transconv):
+        if conn.n_bands > 0 and not (conn.is_conv or conn.is_transconv or conn.is_sparse):
             m, n = new_modulate_weights[i].shape
             new_modulate_weights[i] = new_modulate_weights[i] * _make_band_mask(m, n, conn.n_bands)
-        if conn.is_masked:
+        if conn.is_masked and not conn.is_sparse:
             new_modulate_weights[i] = new_modulate_weights[i] * modulate_weight_masks[i]
 
     new_project_weights = tuple(new_project_weights)
@@ -1134,36 +1018,24 @@ def _combined_step(
 
     # Return pre-update errors/precisions from energy; callers recompute at new state when logging
     return (
-        new_values,
-        pre_update_errors,
-        pre_update_precisions,
-        tuple(new_pw),
-        tuple(new_pb),
-        new_project_weights,
-        tuple(new_proj_b),
-        new_modulate_weights,
-        tuple(new_mod_b),
-        tuple(new_ppw),
-        tuple(new_ppb),
-        new_values_opt_state,
-        new_params_opt_state,
+        new_values, pre_update_errors, pre_update_precisions,
+        tuple(new_pw), tuple(new_pb),
+        new_project_weights, tuple(new_proj_b),
+        new_modulate_weights, tuple(new_mod_b),
+        tuple(new_ppw), tuple(new_ppb),
+        new_values_opt_state, new_params_opt_state,
     )
 
 
 def _recompute_errors_precisions(
-    values,
-    predict_conns,
-    predict_weights,
-    predict_biases,
-    precision_weights,
-    precision_biases,
-    activation_fns,
+    values, predict_conns, predict_weights, predict_biases,
+    precision_weights, precision_biases, activation_fns,
     predict_error_activations: tuple = (),
     prev_errors: tuple = (),
     predict_precision_activations: tuple = (),
     prev_precisions: tuple = (),
     is_stochastic: bool = False,
-    key=None,
+    key = None,
     project_weights: tuple = (),
     modulate_weights: tuple = (),
     project_biases: tuple = (),
@@ -1172,10 +1044,7 @@ def _recompute_errors_precisions(
     modulate_conns_precision: tuple = (),
     project_conns_internal: tuple = (),
     modulate_conns_internal: tuple = (),
-    hist=(),
-    tick_base=0,
-    iter_idx=0,
-    iters_per_timestep=1,
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
 ):
     """Compute errors and precisions at the given values (forward pass only).
 
@@ -1199,63 +1068,41 @@ def _recompute_errors_precisions(
         dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
         pre_act = conn.get_pre(values, (), activation_fns, delayed_srcs=dsrc)
         pre_value = conn.get_pre_value(values, delayed_srcs=dsrc) if conn.is_res else None
-        prediction = conn.prediction(pre_act, predict_weights[i], predict_biases[i], pre_value)
+        prediction = conn.prediction(
+            pre_act, predict_weights[i], predict_biases[i], pre_value)
         prec_in = conn.get_precision_input(
-            pre_act, values, prev_errors, prev_precisions, activation_fns
-        )
+            pre_act, values, prev_errors, prev_precisions, activation_fns)
         prediction = _add_prediction_noise(
-            conn,
-            i,
-            prediction,
-            prec_in,
-            precision_weights[i],
-            precision_biases[i],
-            is_stochastic,
-            key,
-        )
-        log_prec = conn.log_precision_fn(prec_in, precision_weights[i], precision_biases[i])
+            conn, i, prediction, prec_in,
+            precision_weights[i], precision_biases[i], is_stochastic, key)
+        log_prec = conn.log_precision_fn(
+            prec_in, precision_weights[i], precision_biases[i])
         prev_p_i = prev_precisions[i] if prev_precisions else None
-        precision = _activated_precision(predict_precision_activations, conn, i, log_prec, prev_p_i)
+        precision = _activated_precision(
+            predict_precision_activations, conn, i, log_prec, prev_p_i)
         prev_e_i = prev_errors[i] if prev_errors else None
-        errors.append(
-            _activated_error(
-                predict_error_activations, conn, i, conn.get_post(values) - prediction, prev_e_i
-            )
-        )
+        errors.append(_activated_error(
+            predict_error_activations, conn, i,
+            conn.get_post(values) - prediction, prev_e_i))
         precisions.append(precision)
 
     precisions = _apply_project_modulate_precision(
-        tuple(precisions),
-        values,
-        tuple(errors),
-        project_weights,
-        modulate_weights,
-        project_conns_precision,
-        modulate_conns_precision,
+        tuple(precisions), values, tuple(errors),
+        project_weights, modulate_weights,
+        project_conns_precision, modulate_conns_precision,
         activation_fns,
-        project_biases=project_biases,
-        modulate_biases=modulate_biases,
-        hist=hist,
-        tick_base=tick_base,
-        iter_idx=iter_idx,
-        iters_per_timestep=iters_per_timestep,
-    )
+        project_biases=project_biases, modulate_biases=modulate_biases,
+        hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+        iters_per_timestep=iters_per_timestep)
     errors = _apply_project_modulate_internal(
-        tuple(errors),
-        values,
-        project_weights,
-        modulate_weights,
-        project_conns_internal,
-        modulate_conns_internal,
+        tuple(errors), values,
+        project_weights, modulate_weights,
+        project_conns_internal, modulate_conns_internal,
         activation_fns,
         precisions=precisions,
-        project_biases=project_biases,
-        modulate_biases=modulate_biases,
-        hist=hist,
-        tick_base=tick_base,
-        iter_idx=iter_idx,
-        iters_per_timestep=iters_per_timestep,
-    )
+        project_biases=project_biases, modulate_biases=modulate_biases,
+        hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+        iters_per_timestep=iters_per_timestep)
     return tuple(errors), tuple(precisions)
 
 
@@ -1280,12 +1127,12 @@ def _inference_step(
     values_optimizer,
     values_opt_state,
     is_poisson_types: tuple = None,
-    key=None,
+    key = None,
     is_stochastic: bool = False,
     spatial_layers: tuple = (),
     spatial_neighborhoods: tuple = (),
     inference_regs: tuple = (),
-    labels=None,
+    labels = None,
     # Attention mechanisms
     project_conns_precision: tuple = (),
     modulate_conns_precision: tuple = (),
@@ -1303,12 +1150,10 @@ def _inference_step(
     is_boundary=None,
     # Delay history buffers threaded from run_batch. hist=() => delay==0 path
     # (bit-identical). See _combined_step for the argument semantics.
-    hist=(),
-    tick_base=0,
-    iter_idx=0,
-    iters_per_timestep=1,
-) -> tuple[tuple, tuple, tuple, jnp.ndarray, Any]:
-    """Single inference step: compute energy-based value gradients and update values.
+    hist=(), tick_base=0, iter_idx=0, iters_per_timestep=1,
+) -> Tuple[tuple, tuple, tuple, jnp.ndarray, Any]:
+    """
+    Single inference step: compute energy-based value gradients and update values.
 
     Uses value_and_grad with has_aux to return errors/precisions from the
     energy forward pass without a redundant recomputation.
@@ -1319,7 +1164,6 @@ def _inference_step(
     Note: errors and precisions are at the PRE-UPDATE values (computed during
     the energy forward pass). Caller is responsible for recomputing at new
     values when needed (e.g., for logging).
-
     """
     n_layers = len(values)
     batch_size = values[0].shape[0]
@@ -1337,47 +1181,42 @@ def _inference_step(
         # 1b. Compute per-leg flow gates (Mechanism 2)
         flow_gates_pre = []
         flow_gates_post = []
-        for conn in predict_conns:
+        for i, conn in enumerate(predict_conns):
             post_dim = mod_vals[conn.post_idx].shape[-1]
             flow_gates_pre.append(jnp.ones((batch_size, post_dim)))
             flow_gates_post.append(jnp.ones((batch_size, post_dim)))
         for weight_idx, mc in modulate_conns_flow_pre:
             pre_act = mc.get_pre(mod_vals, errors, activation_fns)
-            gate = mc.apply(jax.lax.stop_gradient(pre_act), sg_mod_w[weight_idx])
+            gate = mc.apply(
+                jax.lax.stop_gradient(pre_act), sg_mod_w[weight_idx])
             flow_gates_pre[mc.post_idx] = flow_gates_pre[mc.post_idx] * gate
         for weight_idx, mc in modulate_conns_flow_post:
             pre_act = mc.get_pre(mod_vals, errors, activation_fns)
-            gate = mc.apply(jax.lax.stop_gradient(pre_act), sg_mod_w[weight_idx])
+            gate = mc.apply(
+                jax.lax.stop_gradient(pre_act), sg_mod_w[weight_idx])
             flow_gates_post[mc.post_idx] = flow_gates_post[mc.post_idx] * gate
         flow_gates_pre = tuple(flow_gates_pre)
         flow_gates_post = tuple(flow_gates_post)
 
         # 2. Compute predictions, errors, precisions from mod_vals
-        E = 0.0
+        E = 0.
         all_errors = []
         all_precisions = []
         all_e_pre = []
         all_e_post = []
         for i, conn in enumerate(predict_conns):
             dsrc = _delayed_srcs(conn, hist, tick_base, iter_idx, iters_per_timestep)
-            pre_act = conn.get_pre(
-                mod_vals, (), activation_fns, layer_activations, key, delayed_srcs=dsrc
-            )
+            pre_act = conn.get_pre(mod_vals, (), activation_fns,
+                                   layer_activations, key, delayed_srcs=dsrc)
             pre_value = conn.get_pre_value(mod_vals, delayed_srcs=dsrc) if conn.is_res else None
-            prediction = conn.prediction(pre_act, predict_weights[i], predict_biases[i], pre_value)
+            prediction = conn.prediction(
+                pre_act, predict_weights[i], predict_biases[i], pre_value)
             prec_in = conn.get_precision_input(
-                pre_act, mod_vals, errors, precisions, activation_fns, layer_activations, key
-            )
+                pre_act, mod_vals, errors, precisions,
+                activation_fns, layer_activations, key)
             prediction = _add_prediction_noise(
-                conn,
-                i,
-                prediction,
-                prec_in,
-                precision_weights[i],
-                precision_biases[i],
-                is_stochastic,
-                key,
-            )
+                conn, i, prediction, prec_in,
+                precision_weights[i], precision_biases[i], is_stochastic, key)
             if conn.unit_precision:
                 # Precision is provably 1.0 — skip the (loop-invariant) softplus
                 # of a runtime bias; a compile-time ones constant lets XLA fold
@@ -1389,76 +1228,51 @@ def _inference_step(
                 log_prec = conn.log_precision_fn(prec_in, precision_weights[i], precision_biases[i])
                 prev_p_i = precisions[i] if precisions else None
                 precision = _activated_precision(
-                    predict_precision_activations, conn, i, log_prec, prev_p_i, key=key
-                )
+                    predict_precision_activations, conn, i, log_prec, prev_p_i,
+                    key=key)
             post_val = conn.get_post(mod_vals)
             prev_e_i = errors[i] if errors else None
             residual = _activated_error(
-                predict_error_activations, conn, i, post_val - prediction, prev_e_i, key=key
-            )
+                predict_error_activations, conn, i,
+                post_val - prediction, prev_e_i, key=key)
             all_errors.append(residual)
             all_precisions.append(precision)
 
             if predict_has_flow_gates and predict_has_flow_gates[i]:
-                all_e_pre.append(
-                    _activated_error(
-                        predict_error_activations,
-                        conn,
-                        i,
-                        jax.lax.stop_gradient(post_val) - prediction,
-                        prev_e_i,
-                        key=key,
-                    )
-                )
-                all_e_post.append(
-                    _activated_error(
-                        predict_error_activations,
-                        conn,
-                        i,
-                        post_val - jax.lax.stop_gradient(prediction),
-                        prev_e_i,
-                        key=key,
-                    )
-                )
+                all_e_pre.append(_activated_error(
+                    predict_error_activations, conn, i,
+                    jax.lax.stop_gradient(post_val) - prediction, prev_e_i,
+                    key=key))
+                all_e_post.append(_activated_error(
+                    predict_error_activations, conn, i,
+                    post_val - jax.lax.stop_gradient(prediction), prev_e_i,
+                    key=key))
             else:
                 all_e_pre.append(residual)
                 all_e_post.append(residual)
 
         # 2b. Apply precision-targeting Project/Modulate (Mechanism 1)
         mod_precisions = _apply_project_modulate_precision(
-            tuple(all_precisions),
-            mod_vals,
-            tuple(all_errors),
-            sg_proj_w,
-            sg_mod_w,
-            project_conns_precision,
-            modulate_conns_precision,
+            tuple(all_precisions), mod_vals, tuple(all_errors),
+            sg_proj_w, sg_mod_w,
+            project_conns_precision, modulate_conns_precision,
             activation_fns,
             project_biases=project_biases,
             modulate_biases=modulate_biases,
-            hist=hist,
-            tick_base=tick_base,
-            iter_idx=iter_idx,
-            iters_per_timestep=iters_per_timestep,
-        )
+            hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+            iters_per_timestep=iters_per_timestep)
 
         # 3. Apply error-targeting Project/Modulate
         mod_errors = _apply_project_modulate_internal(
-            tuple(all_errors),
-            mod_vals,
-            sg_proj_w,
-            sg_mod_w,
-            project_conns_internal,
-            modulate_conns_internal,
+            tuple(all_errors), mod_vals,
+            sg_proj_w, sg_mod_w,
+            project_conns_internal, modulate_conns_internal,
             activation_fns,
             precisions=mod_precisions,
             project_biases=project_biases,
             modulate_biases=modulate_biases,
-            hist=hist,
-            tick_base=tick_base,
-            iter_idx=iter_idx,
-            iters_per_timestep=iters_per_timestep,
-        )
+            hist=hist, tick_base=tick_base, iter_idx=iter_idx,
+            iters_per_timestep=iters_per_timestep)
 
         # 3b. Structural attention (Mechanism 3)
         if structural_attention_groups:
@@ -1468,31 +1282,28 @@ def _inference_step(
                 for idx in group.conn_indices:
                     e_i = mod_errors_list[idx]
                     p_i = mod_precisions[idx]
-                    neg_e = -0.5 * jnp.sum(p_i * e_i**2, axis=-1) / group.temperature
+                    neg_e = -0.5 * jnp.sum(
+                        p_i * e_i ** 2, axis=-1) / group.temperature
                     neg_energies.append(neg_e)
-                alphas = jax.nn.softmax(jnp.stack(neg_energies, axis=-1), axis=-1)
+                alphas = jax.nn.softmax(
+                    jnp.stack(neg_energies, axis=-1), axis=-1)
                 for k, idx in enumerate(group.conn_indices):
-                    mod_errors_list[idx] = mod_errors_list[idx] * alphas[:, k : k + 1]
+                    mod_errors_list[idx] = (
+                        mod_errors_list[idx] * alphas[:, k:k+1])
             mod_errors = tuple(mod_errors_list)
 
         # 4. Energy summation
         for i in range(len(predict_conns)):
             scale = pre_scales[i] if pre_scales else 1.0
             if predict_has_flow_gates and predict_has_flow_gates[i]:
-                E = E + scale * 0.5 * jnp.sum(
-                    jnp.mean(
-                        mod_precisions[i] * flow_gates_pre[i] * all_e_pre[i] ** 2
-                        + mod_precisions[i] * flow_gates_post[i] * all_e_post[i] ** 2
-                        - jnp.log(mod_precisions[i]),
-                        axis=-1,
-                    )
-                )
+                E = E + scale * 0.5 * jnp.sum(jnp.mean(
+                    mod_precisions[i] * flow_gates_pre[i] * all_e_pre[i] ** 2
+                    + mod_precisions[i] * flow_gates_post[i] * all_e_post[i] ** 2
+                    - jnp.log(mod_precisions[i]), axis=-1))
             else:
                 E = E + scale * 0.5 * jnp.sum(
-                    jnp.mean(
-                        mod_precisions[i] * mod_errors[i] ** 2 - jnp.log(mod_precisions[i]), axis=-1
-                    )
-                )
+                    jnp.mean(mod_precisions[i] * mod_errors[i] ** 2
+                             - jnp.log(mod_precisions[i]), axis=-1))
 
         # Inference regularization
         for layer_idx, reg in inference_regs:
@@ -1502,14 +1313,14 @@ def _inference_step(
         return E, (tuple(all_errors), tuple(mod_precisions))
 
     (energy_val, (pre_errors, pre_precisions)), val_grads = jax.value_and_grad(
-        energy_with_aux, has_aux=True
-    )(values)
+        energy_with_aux, has_aux=True)(values)
 
     # Apply optax, respecting clamping (soft blend)
     updates, new_values_opt_state = values_optimizer.update(val_grads, values_opt_state, values)
     new_values_raw = optax.apply_updates(values, updates)
     new_values = tuple(
-        _apply_mask(clamped[j], values[j], new_values_raw[j]) for j in range(n_layers)
+        _apply_mask(clamped[j], values[j], new_values_raw[j])
+        for j in range(n_layers)
     )
 
     # Apply value-targeting Project/Modulate as explicit state operators
@@ -1517,23 +1328,15 @@ def _inference_step(
     # read from the frozen pre-update v[t] (= `values`), not the post-energy
     # state, so the energy step and routing both combine from v[t]. Re-clamps.
     new_values = _apply_project_modulate_values(
-        new_values,
-        errors,
-        project_weights,
-        modulate_weights,
-        project_conns_value,
-        modulate_conns_value,
-        activation_fns,
-        clamped,
-        project_biases=project_biases,
-        modulate_biases=modulate_biases,
-        read_values=values,
-        is_boundary=is_boundary,
-        hist=hist,
-        tick_base=tick_base,
-        iter_idx=iter_idx,
+        new_values, errors,
+        project_weights, modulate_weights,
+        project_conns_value, modulate_conns_value,
+        activation_fns, clamped,
+        project_biases=project_biases, modulate_biases=modulate_biases,
+        read_values=values, is_boundary=is_boundary,
+        hist=hist, tick_base=tick_base, iter_idx=iter_idx,
         iters_per_timestep=iters_per_timestep,
-    )
+        precisions=precisions)
 
     return tuple(new_values), pre_errors, pre_precisions, energy_val, new_values_opt_state
 
@@ -1541,25 +1344,21 @@ def _inference_step(
 def _compute_energy(errors: tuple, precisions: tuple, pre_scales: tuple = ()) -> jnp.ndarray:
     """Compute total variational free energy: 0.5*precision*residual^2 - log(precision),
     mean over dimensions, mean over batch, summed across predict connections.
-    pre_scales: per-connection scale factors (1/n_predicts_to_pre); defaults to 1.0.
-    """
+    pre_scales: per-connection scale factors (1/n_predicts_to_pre); defaults to 1.0."""
     energy = 0
-    for i, (error, prec) in enumerate(zip(errors, precisions, strict=False)):
+    for i, (error, prec) in enumerate(zip(errors, precisions)):
         scale = pre_scales[i] if pre_scales else 1.0
         safe_prec = jnp.clip(prec, 1e-8, None)
-        energy = energy + scale * 0.5 * jnp.mean(
-            jnp.mean(prec * error**2 - jnp.log(safe_prec), axis=-1)
-        )
+        energy = energy + scale * 0.5 * jnp.mean(jnp.mean(prec * error ** 2 - jnp.log(safe_prec), axis=-1))
     return energy
 
 
 def _compute_deltas(errors: tuple, precisions: tuple) -> tuple:
     """Second-order errors: delta = 0.5 * (error**2 - 1/precision), per Predict conn.
-    `error` is the raw (non-precision-modulated) residual.
-    """
+    `error` is the raw (non-precision-modulated) residual."""
     return tuple(
-        0.5 * (e**2 - 1.0 / jnp.clip(p, 1e-8, None))
-        for e, p in zip(errors, precisions, strict=False)
+        0.5 * (e ** 2 - 1.0 / jnp.clip(p, 1e-8, None))
+        for e, p in zip(errors, precisions)
     )
 
 
@@ -1576,13 +1375,13 @@ def _single_pass(
     precision_weights: tuple,
     precision_biases: tuple,
     predict_conns: tuple,
-    project_conns: tuple,  # todo: these should be used in single pass too, same order relative to everything as in the combined/inference
-    modulate_conns: tuple,
+    project_conns: tuple, # todo: these should be used in single pass too, same order relative to everything as in the combined/inference
+    modulate_conns: tuple, 
     activation_fns: tuple,
     project_conns_value: tuple = (),
     modulate_conns_value: tuple = (),
     is_poisson_types: tuple = None,
-    key=None,
+    key = None,
     is_stochastic: bool = False,
     predict_error_activations: tuple = (),
     predict_precision_activations: tuple = (),
@@ -1593,8 +1392,12 @@ def _single_pass(
     project_conns_internal: tuple = (),
     modulate_conns_internal: tuple = (),
     precisions_carry: tuple = (),
-) -> tuple[tuple, tuple]:
-    """Single forward pass: propagate clamped values through the network sequentially
+    project_conns_value_preseed: tuple = (),
+    modulate_conns_value_preseed: tuple = (),
+    preseed_target_idxs: frozenset = frozenset(),
+) -> Tuple[tuple, tuple]:
+    """
+    Single forward pass: propagate clamped values through the network sequentially
     and compute errors. Each connection uses values already updated by earlier
     connections, so predictions propagate correctly through multi-layer chains.
     Clamped layer values are always preserved.
@@ -1618,15 +1421,38 @@ def _single_pass(
     new_errors = [jnp.zeros_like(e) for e in errors]
     new_precisions = []
 
+    if feedforward_init and (project_conns_value_preseed
+                             or modulate_conns_value_preseed):
+        # Seed-ordering fix (the todo on project_conns above): value-targeting
+        # Project/Modulate whose every pre is a HARD-CLAMPED value layer are
+        # applied BEFORE the predict loop, so a chain like
+        # ``clamped_raw -Project-> free_input -Predict-> h`` seeds ``h`` from
+        # the projected evidence instead of zeros. Conns with free/soft-
+        # clamped/error/delayed pres keep the historical after-predicts
+        # placement (their pres may be seeded by the predict loop). run_batch
+        # partitions the conns statically from data_map; each conn is applied
+        # exactly once per seed.
+        for weight_idx, conn in project_conns_value_preseed:
+            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns,
+                                   precisions=())
+            p_bias = project_biases[weight_idx] if project_biases else 0.0
+            projection = conn.apply(pre_act, project_weights[weight_idx]) + p_bias
+            updated = _write_additive(new_values[conn.post_idx], projection, conn.post_slice)
+            new_values[conn.post_idx] = _apply_mask(clamped[conn.post_idx], new_values[conn.post_idx], updated)
+        for weight_idx, conn in modulate_conns_value_preseed:
+            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns,
+                                   precisions=())
+            bias = modulate_biases[weight_idx] if modulate_biases else 0.0
+            modulation = conn.apply(pre_act, modulate_weights[weight_idx]) + bias
+            updated = _write_multiplicative(new_values[conn.post_idx], modulation, conn.post_slice)
+            new_values[conn.post_idx] = _apply_mask(clamped[conn.post_idx], new_values[conn.post_idx], updated)
+
     for i, conn in enumerate(predict_conns):
         subkey = jax.random.fold_in(key, i)
 
         # Handle Poisson per-layer for multi-pre
-        has_poisson = (
-            is_poisson_types is not None
-            and any(is_poisson_types[idx] for idx in conn.pre_idx)
-            and key is not None
-        )
+        has_poisson = is_poisson_types is not None and any(
+            is_poisson_types[idx] for idx in conn.pre_idx) and key is not None
         if has_poisson:
             parts = []
             for k, idx in enumerate(conn.pre_idx):
@@ -1639,57 +1465,45 @@ def _single_pass(
                     arr = act_fn(new_values[idx])
                 sl = conn.pre_slices[k] if conn.pre_slices else None
                 if sl is not None:
-                    arr = arr[:, sl[0] : sl[1]]
+                    arr = arr[:, sl[0]:sl[1]]
                 parts.append(arr)
             pre_act = parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=-1)
         else:
-            pre_act = conn.get_pre(tuple(new_values), (), activation_fns, layer_activations, subkey)
+            pre_act = conn.get_pre(tuple(new_values), (), activation_fns,
+                                   layer_activations, subkey)
 
         pre_value = conn.get_pre_value(tuple(new_values)) if conn.is_res else None
         prec_in = conn.get_precision_input(
-            pre_act,
-            tuple(new_values),
-            errors,
-            precisions_carry,
-            activation_fns,
-            layer_activations,
-            subkey,
-        )
-        if is_stochastic and key is not None and getattr(conn, "stochastic", True):
+            pre_act, tuple(new_values), errors, precisions_carry,
+            activation_fns, layer_activations, subkey)
+        if is_stochastic and key is not None and getattr(conn, 'stochastic', True):
             stoch_key = jax.random.fold_in(key, i + 1000)
             prediction = conn.stochastic_prediction(
-                pre_act,
-                predict_weights[i],
-                predict_biases[i],
-                precision_weights[i],
-                precision_biases[i],
-                stoch_key,
-                pre_value,
-                precision_input=prec_in,
-                noise_scale=float(is_stochastic) ** 0.5,
+                pre_act, predict_weights[i], predict_biases[i],
+                precision_weights[i], precision_biases[i], stoch_key, pre_value,
+                precision_input=prec_in, noise_scale=float(is_stochastic) ** 0.5,
             )
         else:
             prediction = conn.prediction(pre_act, predict_weights[i], predict_biases[i], pre_value)
-        log_prec = conn.log_precision_fn(prec_in, precision_weights[i], precision_biases[i])
+        log_prec = conn.log_precision_fn(
+            prec_in, precision_weights[i], precision_biases[i])
         precision = _activated_precision(
-            predict_precision_activations, conn, i, log_prec, None, key=subkey
-        )
+            predict_precision_activations, conn, i, log_prec, None, key=subkey)
         post_val = conn.get_post(tuple(new_values))
         prev_e_i = errors[i] if errors else None
         new_errors[i] = _activated_error(
-            predict_error_activations, conn, i, post_val - prediction, prev_e_i, key=subkey
-        )
+            predict_error_activations, conn, i,
+            post_val - prediction, prev_e_i, key=subkey)
         new_precisions.append(precision)
         # Set post-layer values to a soft blend of clamped input and prediction.
-        # Skipped when feedforward_init is off so non-clamped values stay at init.
-        if feedforward_init:
+        # Skipped when feedforward_init is off so non-clamped values stay at
+        # init, and for preseed-target layers, whose seed value is clamped-
+        # evidence-derived (see the preseed loop above) and must survive the
+        # predict loop intact.
+        if feedforward_init and conn.post_idx not in preseed_target_idxs:
             if conn.post_slice:
                 s, e = conn.post_slice
-                clamp_slice = (
-                    clamped[conn.post_idx][:, s:e]
-                    if clamped[conn.post_idx].ndim > 1
-                    else clamped[conn.post_idx]
-                )
+                clamp_slice = clamped[conn.post_idx][:, s:e] if clamped[conn.post_idx].ndim > 1 else clamped[conn.post_idx]
                 updated = _apply_mask(clamp_slice, post_val, prediction)
                 new_values[conn.post_idx] = new_values[conn.post_idx].at[:, s:e].set(updated)
             else:
@@ -1700,66 +1514,49 @@ def _single_pass(
     if feedforward_init:
         # Apply value-targeting Project connections (additive)
         for weight_idx, conn in project_conns_value:
-            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns)
+            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns,
+                                   precisions=tuple(new_precisions))
             p_bias = project_biases[weight_idx] if project_biases else 0.0
             projection = conn.apply(pre_act, project_weights[weight_idx]) + p_bias
             updated = _write_additive(new_values[conn.post_idx], projection, conn.post_slice)
-            new_values[conn.post_idx] = _apply_mask(
-                clamped[conn.post_idx], new_values[conn.post_idx], updated
-            )
+            new_values[conn.post_idx] = _apply_mask(clamped[conn.post_idx], new_values[conn.post_idx], updated)
 
         # Apply value-targeting Modulate connections (multiplicative)
         for weight_idx, conn in modulate_conns_value:
-            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns)
+            pre_act = conn.get_pre(tuple(new_values), errors, activation_fns,
+                                   precisions=tuple(new_precisions))
             bias = modulate_biases[weight_idx] if modulate_biases else 0.0
             modulation = conn.apply(pre_act, modulate_weights[weight_idx]) + bias
             updated = _write_multiplicative(new_values[conn.post_idx], modulation, conn.post_slice)
-            new_values[conn.post_idx] = _apply_mask(
-                clamped[conn.post_idx], new_values[conn.post_idx], updated
-            )
+            new_values[conn.post_idx] = _apply_mask(clamped[conn.post_idx], new_values[conn.post_idx], updated)
 
     # Apply precision- then error-targeting Project/Modulate so the initial
     # carried errors/precisions match what the inference energy will consume.
     new_precisions = _apply_project_modulate_precision(
-        tuple(new_precisions),
-        tuple(new_values),
-        tuple(new_errors),
-        project_weights,
-        modulate_weights,
-        project_conns_precision,
-        modulate_conns_precision,
+        tuple(new_precisions), tuple(new_values), tuple(new_errors),
+        project_weights, modulate_weights,
+        project_conns_precision, modulate_conns_precision,
         activation_fns,
-        project_biases=project_biases,
-        modulate_biases=modulate_biases,
-    )
+        project_biases=project_biases, modulate_biases=modulate_biases)
     new_errors = _apply_project_modulate_internal(
-        tuple(new_errors),
-        tuple(new_values),
-        project_weights,
-        modulate_weights,
-        project_conns_internal,
-        modulate_conns_internal,
+        tuple(new_errors), tuple(new_values),
+        project_weights, modulate_weights,
+        project_conns_internal, modulate_conns_internal,
         activation_fns,
         precisions=new_precisions,
-        project_biases=project_biases,
-        modulate_biases=modulate_biases,
-    )
+        project_biases=project_biases, modulate_biases=modulate_biases)
 
     return tuple(new_values), tuple(new_errors), tuple(new_precisions)
 
 
 def _learn_project_modulate_weights(
-    values,
-    errors,
-    project_weights,
-    modulate_weights,
-    project_conns,
-    modulate_conns,
-    activation_fns,
-    batch_size,
+    values, errors,
+    project_weights, modulate_weights,
+    project_conns, modulate_conns,
+    activation_fns, batch_size,
     reward_fns=(),
     precisions=(),
-    reward_fn_sample_arrays: dict = None,
+    reward_fn_sample_arrays: dict = {},
 ):
     """Learn Project/Modulate weights using Hebbian/ThreeFactorHebbian rules.
 
@@ -1767,8 +1564,6 @@ def _learn_project_modulate_weights(
     the energy backward pass (loss_fn=None) or a separate loss gradient
     (loss_fn provided) in _combined_step.
     """
-    if reward_fn_sample_arrays is None:
-        reward_fn_sample_arrays = {}
     new_pw = list(project_weights)
     new_mw = list(modulate_weights)
     node_arrays = (tuple(values), tuple(errors), tuple(precisions))
@@ -1780,25 +1575,49 @@ def _learn_project_modulate_weights(
         pre_act = conn.get_pre(values, errors, activation_fns, precisions=precisions)
         post_arr = conn.get_post(values, errors, precisions=precisions)
 
+        sparse = isinstance(W, SparseWeight)
+        if sparse:
+            # Batch-mean outer product post^T pre sampled at the index set
+            # (nse,) — never the dense (post_dim, pre_dim) product.
+            def _outer(post):
+                return sampled_outer(post, pre_act, W.indices) / post.shape[0]
+
         if conn.learning_rule_type == 0:  # Hebbian
-            dW = conn.learning_rate * jnp.mean(post_arr[:, :, None] * pre_act[:, None, :], axis=0)
-            weights_list[idx] = W + dW
+            if sparse:
+                weights_list[idx] = W.with_data(
+                    W.data + conn.learning_rate * _outer(post_arr))
+            else:
+                dW = conn.learning_rate * jnp.mean(
+                    post_arr[:, :, None] * pre_act[:, None, :], axis=0)
+                weights_list[idx] = W + dW
         elif conn.learning_rule_type == 3:  # Oja
-            hebbian = post_arr[:, :, None] * pre_act[:, None, :]
-            decay = (post_arr**2)[:, :, None] * W[None, :, :]
-            dW = conn.learning_rate * jnp.mean(hebbian - decay, axis=0)
-            weights_list[idx] = W + dW
+            if sparse:
+                # decay_k = mean_b post[b, row_k]^2 * W_k
+                sq = jnp.mean(post_arr ** 2, axis=0)
+                decay = sq[W.indices[:, 0]] * W.data
+                weights_list[idx] = W.with_data(
+                    W.data + conn.learning_rate * (_outer(post_arr) - decay))
+            else:
+                hebbian = post_arr[:, :, None] * pre_act[:, None, :]
+                decay = (post_arr ** 2)[:, :, None] * W[None, :, :]
+                dW = conn.learning_rate * jnp.mean(hebbian - decay, axis=0)
+                weights_list[idx] = W + dW
         elif conn.learning_rule_type == 1:  # ThreeFactorHebbian
             if conn.reward_fn_idx >= 0 and len(reward_fns) > conn.reward_fn_idx:
                 resolved_inputs, fn = reward_fns[conn.reward_fn_idx]
-                args = _gather_loss_fn_args(resolved_inputs, node_arrays, reward_fn_sample_arrays)
+                args = _gather_loss_fn_args(
+                    resolved_inputs, node_arrays, reward_fn_sample_arrays)
                 reward = fn(*args)
                 if reward.ndim == 0:
                     reward = jnp.broadcast_to(reward, (batch_size,))
-                dW = conn.learning_rate * jnp.mean(
-                    reward[:, None, None] * post_arr[:, :, None] * pre_act[:, None, :], axis=0
-                )
-                weights_list[idx] = W + dW
+                if sparse:
+                    weights_list[idx] = W.with_data(
+                        W.data + conn.learning_rate * _outer(reward[:, None] * post_arr))
+                else:
+                    dW = conn.learning_rate * jnp.mean(
+                        reward[:, None, None] * post_arr[:, :, None] * pre_act[:, None, :],
+                        axis=0)
+                    weights_list[idx] = W + dW
 
     for i, conn in enumerate(project_conns):
         _apply_rule(project_weights[i], conn, new_pw, i)
@@ -1809,14 +1628,14 @@ def _learn_project_modulate_weights(
     return tuple(new_pw), tuple(new_mw)
 
 
+
 # ============================================================================
 # Main simulation function
 # ============================================================================
 
-
-@eqx.filter_jit(donate="all")
+@eqx.filter_jit(donate='all')
 def run_batch(
-    sample: dict[str, jnp.ndarray],
+    sample: Dict[str, jnp.ndarray],
     params: NetworkParams,
     structure: NetworkStructure,
     data_map: tuple,
@@ -1828,10 +1647,10 @@ def run_batch(
     loss_fns: tuple = (),
     convergence_threshold: float = 0.0,
     key: jnp.ndarray = None,
-    values_optimizer=None,
-    values_opt_state=None,
-    params_optimizer=None,
-    params_opt_state=None,
+    values_optimizer = None,
+    values_opt_state = None,
+    params_optimizer = None,
+    params_opt_state = None,
     is_stochastic: bool = False,
     spatial_neighborhoods: tuple = (),
     log_initial: bool = False,
@@ -1842,8 +1661,9 @@ def run_batch(
     predict_precision_activations: tuple = (),
     layer_activations: tuple = (),
     feedforward_init: bool = True,
-) -> tuple[NetworkParams, Any, Any, tuple, tuple, tuple, tuple, jnp.ndarray]:
-    """Run a complete batch: init -> clamp -> reset -> inference -> weight update.
+) -> Tuple[NetworkParams, Any, Any, tuple, tuple, tuple, tuple, jnp.ndarray]:
+    """
+    Run a complete batch: init -> clamp -> reset -> inference -> weight update.
 
     Returns:
         new_params, new_params_opt_state, new_values_opt_state,
@@ -1855,7 +1675,6 @@ def run_batch(
     If `log_initial=True`, the logs (and `energies`) have one extra leading slot
     holding the state right after the initial forward pass (i.e. before any
     inference step). All subsequent log writes shift by +1. Default False.
-
     """
     # Unpack params
     predict_weights = tuple(params.predict_weights)
@@ -1901,43 +1720,44 @@ def run_batch(
     loss_fn_sample_keys = structure.loss_fn_sample_keys
 
     # Extract sample arrays needed by loss functions
-    loss_fn_sample_arrays = (
-        {k: sample[k] for k in loss_fn_sample_keys} if loss_fn_sample_keys else {}
-    )
+    loss_fn_sample_arrays = {k: sample[k] for k in loss_fn_sample_keys} if loss_fn_sample_keys else {}
 
     activation_types = tuple(layer.activation_type for layer in structure.layers)
     activation_temps = tuple(
-        float(getattr(layer, "activation_temperature", 1.0)) for layer in structure.layers
-    )
+        float(getattr(layer, 'activation_temperature', 1.0)) for layer in structure.layers)
     activation_winners = tuple(
-        int(getattr(layer, "activation_num_winners", 0)) for layer in structure.layers
-    )
-
+        int(getattr(layer, 'activation_num_winners', 0)) for layer in structure.layers)
+    activation_thresholds = tuple(
+        tuple(getattr(layer, 'activation_thresholds', ())) for layer in structure.layers)
     # Apply input temperature as activation(x / T); T==1.0 is the plain fn.
     # NWTA layers (num_winners > 0) bake the winner count into the closure,
-    # mirroring how Softmax bakes in its temperature.
-    def _build_activation_fn(t, T, nw):
+    # mirroring how Softmax bakes in its temperature. ThresholdRelu layers
+    # (non-empty thresholds) bake the per-neuron subtractive thresholds:
+    # f(x) = max(x - theta, 0).
+    def _build_activation_fn(t, T, nw, thr):
+        if thr:
+            return lambda x, _a=jnp.asarray(thr): jnp.maximum(x - _a, 0)
         if nw > 0:
             return lambda x, _nw=nw: _nwta(x, _nw)
         if T == 1.0:
             return ACTIVATIONS[t]
         return lambda x, _t=t, _T=T: ACTIVATIONS[_t](x / _T)
-
     activation_fns = tuple(
-        _build_activation_fn(t, T, nw)
-        for t, T, nw in zip(activation_types, activation_temps, activation_winners, strict=False)
-    )
+        _build_activation_fn(t, T, nw, thr)
+        for t, T, nw, thr in zip(activation_types, activation_temps,
+                                 activation_winners, activation_thresholds))
     is_poisson_types = tuple(layer.is_poisson for layer in structure.layers)
     # Per-layer Activation instances are only threaded into the prediction
     # pre-activation when at least one layer is stochastic; otherwise the
     # plain ``activation_fns`` path is used (zero behaviour change).
-    _layer_acts = (
-        layer_activations if any(getattr(a, "needs_key", False) for a in layer_activations) else ()
-    )
+    _layer_acts = layer_activations if any(
+        getattr(a, 'needs_key', False) for a in layer_activations) else ()
     # Per-layer dropout probability; 0.0 means no dropout. Plumbed to the
     # predict-loop so Bernoulli masks are applied to activated values used as
     # downstream predictions during *learning* (training) only.
-    dropout_probs = tuple(float(getattr(layer, "dropout_prob", 0.0)) for layer in structure.layers)
+    dropout_probs = tuple(
+        float(getattr(layer, 'dropout_prob', 0.0)) for layer in structure.layers
+    )
 
     # Use PRNGKey(0) if no key provided
     if key is None:
@@ -1965,15 +1785,15 @@ def run_batch(
         _dropout_masks = tuple(
             jax.random.bernoulli(
                 jax.random.fold_in(key, 0xD20 + i),
-                1.0 - p,
-                shape=(batch_size, dim),
+                1.0 - p, shape=(batch_size, dim),
             ).astype(jnp.float32)
-            if p > 0.0
-            else jnp.ones((batch_size, dim), dtype=jnp.float32)
-            for i, (p, dim) in enumerate(zip(dropout_probs, layer_dims, strict=False))
+            if p > 0.0 else jnp.ones((batch_size, dim), dtype=jnp.float32)
+            for i, (p, dim) in enumerate(zip(dropout_probs, layer_dims))
         )
     else:
-        _dropout_masks = tuple(jnp.ones((batch_size, dim), dtype=jnp.float32) for dim in layer_dims)
+        _dropout_masks = tuple(
+            jnp.ones((batch_size, dim), dtype=jnp.float32) for dim in layer_dims
+        )
 
     # Initialize state
     n_layers = len(layer_dims)
@@ -1999,23 +1819,20 @@ def run_batch(
             T = data.shape[1]
             if n_timesteps == 1:
                 n_timesteps = T
-            elif n_timesteps != T:
+            elif T != n_timesteps:
                 raise ValueError(
-                    f"Inconsistent temporal dimensions: expected {n_timesteps}, got {T}"
-                )
+                    f"Inconsistent temporal dimensions: expected {n_timesteps}, got {T}")
 
     # Validate temporal dimension
     total_iterations = n_iterations + (n_learning_iterations if learning else 0)
     if n_timesteps > 1:
         if n_timesteps > total_iterations:
             raise ValueError(
-                f"n_timesteps ({n_timesteps}) exceeds total_iterations ({total_iterations})"
-            )
+                f"n_timesteps ({n_timesteps}) exceeds total_iterations ({total_iterations})")
         if total_iterations % n_timesteps != 0:
             raise ValueError(
                 f"total_iterations ({total_iterations}) is not an integer multiple of "
-                f"n_timesteps ({n_timesteps})"
-            )
+                f"n_timesteps ({n_timesteps})")
     iters_per_timestep = max(total_iterations, 1) // n_timesteps
 
     # advance='timestep' gating: only pay for the boundary indicator when at
@@ -2023,9 +1840,8 @@ def run_batch(
     # a plain Python check over the static specs (trace time), so networks with
     # no gated conn get `is_boundary=None` and the original, un-gated code path.
     _has_ts_gated_value_pm = any(
-        getattr(s, "advance_timestep", False)
-        for _, s in tuple(project_conns_value) + tuple(modulate_conns_value)
-    )
+        getattr(s, 'advance_timestep', False)
+        for _, s in tuple(project_conns_value) + tuple(modulate_conns_value))
 
     def _timestep_boundary(iter_idx):
         """Traced bool: True on the first inference iteration of a timestep."""
@@ -2062,8 +1878,7 @@ def run_batch(
     # (depth, B, 1) ring).
     _precision_dims = tuple(
         1 if conn.unit_precision else ed
-        for conn, ed in zip(predict_conns, predict_error_dims, strict=False)
-    )
+        for conn, ed in zip(predict_conns, predict_error_dims))
 
     def _hist_buf_dim(node_type, node_id):
         if node_type == 0:
@@ -2074,7 +1889,7 @@ def run_batch(
 
     hist = tuple(
         jnp.zeros((depth + 1, batch_size, _hist_buf_dim(nt, node_id)))
-        for (node_id, depth), nt in zip(_hist_specs, _hist_node_types, strict=False)
+        for (node_id, depth), nt in zip(_hist_specs, _hist_node_types)
     )
 
     # Per-predict-conn maps: error/precision node -> hist buffer index. Empty
@@ -2083,24 +1898,14 @@ def run_batch(
     errors_consumed = any(nt == 1 for nt in _hist_node_types)
     precisions_consumed = any(nt == 2 for nt in _hist_node_types)
     if errors_consumed:
-        _emap = {
-            node_id: k
-            for k, ((node_id, _d), nt) in enumerate(
-                zip(_hist_specs, _hist_node_types, strict=False)
-            )
-            if nt == 1
-        }
+        _emap = {node_id: k for k, ((node_id, _d), nt)
+                 in enumerate(zip(_hist_specs, _hist_node_types)) if nt == 1}
         err_buf_idx = tuple(_emap[i] for i in range(_n_predict))
     else:
         err_buf_idx = ()
     if precisions_consumed:
-        _pmap = {
-            node_id: k
-            for k, ((node_id, _d), nt) in enumerate(
-                zip(_hist_specs, _hist_node_types, strict=False)
-            )
-            if nt == 2
-        }
+        _pmap = {node_id: k for k, ((node_id, _d), nt)
+                 in enumerate(zip(_hist_specs, _hist_node_types)) if nt == 2}
         prec_buf_idx = tuple(_pmap[i] for i in range(_n_predict))
     else:
         prec_buf_idx = ()
@@ -2125,8 +1930,9 @@ def run_batch(
                 tick = global_iter // iters_per_timestep
                 push = ((global_iter % iters_per_timestep) == 0) & (global_iter > 0)
                 slot = (tick - 1) % S
-                new[k] = jnp.where(push, hist[k].at[slot].set(values[node_id]), hist[k])
-            else:  # sliding ('iteration'): write every iteration
+                new[k] = jnp.where(
+                    push, hist[k].at[slot].set(values[node_id]), hist[k])
+            else:                 # sliding ('iteration'): write every iteration
                 new[k] = hist[k].at[global_iter % S].set(values[node_id])
         return tuple(new)
 
@@ -2139,9 +1945,9 @@ def run_batch(
         if not buf_idx_map:
             return ()
         return tuple(
-            _read_delayed(hist, buf_idx_map[i], 1, False, tick_base, iter_idx, iters_per_timestep)
-            for i in range(len(buf_idx_map))
-        )
+            _read_delayed(hist, buf_idx_map[i], 1, False,
+                          tick_base, iter_idx, iters_per_timestep)
+            for i in range(len(buf_idx_map)))
 
     def _write_hist_ep(hist, err_arrays, prec_arrays, global_iter):
         """Write the step's carry-out errors/precisions into their depth-1
@@ -2173,9 +1979,7 @@ def run_batch(
                 data = data[:, None, :]
             temporal_clamp_list[layer_idx] = data
             values_list[layer_idx] = data[:, 0, :]
-            clamped_list[layer_idx] = jnp.ones(
-                (batch_size, layer_dims[layer_idx]), dtype=jnp.float32
-            )
+            clamped_list[layer_idx] = jnp.ones((batch_size, layer_dims[layer_idx]), dtype=jnp.float32)
         else:
             data_key, mask_key = sample_key_or_pair
             data = sample[data_key]
@@ -2188,11 +1992,46 @@ def run_batch(
             values_list[layer_idx] = _apply_mask(mask_t0, data[:, 0, :], values_list[layer_idx])
     temporal_clamp_values = tuple(temporal_clamp_list)
     clamped = tuple(
-        c
-        if c.ndim == 3
-        else jnp.broadcast_to(c[:, None, :], (batch_size, n_timesteps, c.shape[-1]))
+        c if c.ndim == 3 else jnp.broadcast_to(c[:, None, :], (batch_size, n_timesteps, c.shape[-1]))
         for c in clamped_list
     )
+
+    # Static partition of value-targeting Project/Modulate for the seed pass:
+    # conns whose every pre is a HARD-clamped (plain string data_map entry)
+    # value layer have final pre values before the predict loop runs, so
+    # _single_pass applies them FIRST — chains like clamped -> Project ->
+    # free_input -> Predict then seed from real evidence. Everything else
+    # (free / soft-clamped / error / delayed pres) keeps the historical
+    # after-predicts placement.
+    _hard_clamped_idxs = frozenset(
+        entry[0] for entry in data_map
+        if entry[0] != -1 and isinstance(entry[1], str))
+
+    def _preseedable(c):
+        # advance='timestep' conns preseed too: the seed pass IS the first
+        # frame boundary, and the historical seed loop applied them there
+        # unconditionally — excluding them would make advance='timestep'
+        # seed differently from the equivalent advance='iteration' conn.
+        return (c.pre_node_type == 0 and c.delay == 0
+                and all(p in _hard_clamped_idxs for p in c.pre_idx))
+
+    pcv_preseed = tuple(t for t in project_conns_value if _preseedable(t[1]))
+    mcv_preseed = tuple(t for t in modulate_conns_value if _preseedable(t[1]))
+    # Layers seeded by clamped-evidence PM are treated as evidence for the
+    # REST of the seed pass: the predict loop must not blend predictions over
+    # them, and after-predicts value-PM (e.g. a -I decay self-Project, whose
+    # job is cancelling the value carry during ITERATIONS) must not re-fire
+    # on them at the seed — otherwise a gated-input chain ends its seed at 0
+    # and the first inference iteration consumes corrupted evidence.
+    _preseed_targets = frozenset(
+        t[1].post_idx for t in (pcv_preseed + mcv_preseed)
+        if t[1].post_node_type == 0)
+    pcv_after = tuple(
+        t for t in project_conns_value if not _preseedable(t[1])
+        and not (t[1].post_node_type == 0 and t[1].post_idx in _preseed_targets))
+    mcv_after = tuple(
+        t for t in modulate_conns_value if not _preseedable(t[1])
+        and not (t[1].post_node_type == 0 and t[1].post_idx in _preseed_targets))
 
     # Forward pass
     errors_init = tuple(jnp.zeros((batch_size, dim)) for dim in predict_error_dims)
@@ -2200,37 +2039,24 @@ def run_batch(
     # precision on the very first pass: use the activated init precision
     # g(precision_bias). Only built when some conn actually has such a source,
     # keeping the default graph unchanged.
-    if any(
-        2 in c.precision_input_node_types for c in predict_conns if c.precision_input_node_types
-    ):
+    if any(2 in c.precision_input_node_types for c in predict_conns
+           if c.precision_input_node_types):
         precisions_carry_init = tuple(
-            jnp.broadcast_to(conn.precision_transform(pb)[None, :], (batch_size, pb.shape[0]))
-            for conn, pb in zip(predict_conns, precision_biases, strict=False)
-        )
+            jnp.broadcast_to(conn.precision_transform(pb)[None, :],
+                             (batch_size, pb.shape[0]))
+            for conn, pb in zip(predict_conns, precision_biases))
     else:
         precisions_carry_init = ()
     clamped_t0 = tuple(c[:, 0, :] for c in clamped)
     values, errors, precisions = _single_pass(
-        tuple(values_list),
-        errors_init,
-        clamped_t0,
-        predict_weights,
-        predict_biases,
-        project_weights,
-        project_biases,
-        modulate_weights,
-        modulate_biases,
-        precision_weights,
-        precision_biases,
-        predict_conns,
-        project_conns,
-        modulate_conns,
-        activation_fns,
-        project_conns_value,
-        modulate_conns_value,
-        is_poisson_types,
-        key,
-        is_stochastic,
+        tuple(values_list), errors_init, clamped_t0,
+        predict_weights, predict_biases,
+        project_weights, project_biases,
+        modulate_weights, modulate_biases,
+        precision_weights, precision_biases,
+        predict_conns, project_conns, modulate_conns,
+        activation_fns, pcv_after, mcv_after,
+        is_poisson_types, key, is_stochastic,
         predict_error_activations=predict_error_activations,
         predict_precision_activations=predict_precision_activations,
         layer_activations=_layer_acts,
@@ -2240,6 +2066,9 @@ def run_batch(
         project_conns_internal=project_conns_internal,
         modulate_conns_internal=modulate_conns_internal,
         precisions_carry=precisions_carry_init,
+        project_conns_value_preseed=pcv_preseed,
+        modulate_conns_value_preseed=mcv_preseed,
+        preseed_target_idxs=_preseed_targets,
     )
 
     # Phase 2 bootstrap: pre-fill the error/precision one-step buffers so
@@ -2261,7 +2090,7 @@ def run_batch(
         _values_optimizer.init(values) if values_opt_state is None else values_opt_state
     )
 
-    if (n_iterations == 1) and (not learning) and (n_learning_iterations == 0):
+    if (n_iterations == 1) and (learning == False) and (n_learning_iterations == 0):
         values_log = tuple(v[None] for v in values)
         errors_log = tuple(e[None] for e in errors)
         precisions_log = tuple(p[None] for p in precisions)
@@ -2278,16 +2107,7 @@ def run_batch(
             precision_weights=list(precision_weights),
             precision_biases=list(precision_biases),
         )
-        return (
-            new_params,
-            params_opt_state,
-            _values_opt_state,
-            values_log,
-            errors_log,
-            precisions_log,
-            deltas_log,
-            energies,
-        )
+        return new_params, params_opt_state, _values_opt_state, values_log, errors_log, precisions_log, deltas_log, energies
 
     else:
         # log_initial=True reserves slot 0 for the post-_single_pass state and
@@ -2297,17 +2117,7 @@ def run_batch(
         n_logged = (total_iterations + log_every - 1) // log_every + log_initial_offset
         _has_pm_error_reading = bool(project_conns_internal or modulate_conns_internal)
 
-        def _state_log(
-            i,
-            energies_list,
-            values_log,
-            errors_log,
-            precisions_log,
-            deltas_log,
-            values,
-            errors,
-            precisions,
-        ):
+        def _state_log(i, energies_list, values_log, errors_log, precisions_log, deltas_log, values, errors, precisions):
             """Log state conditionally: only computes energy and writes on logging iterations."""
             should_log = (i + 1) % log_every == 0
             log_idx = i // log_every + log_initial_offset
@@ -2316,18 +2126,10 @@ def run_batch(
                 energy = _compute_energy(errors, precisions, predict_pre_scales)
                 deltas = _compute_deltas(errors, precisions)
                 new_energies = energies_list.at[log_idx].set(energy)
-                new_vl = tuple(
-                    vl.at[log_idx].set(v) for vl, v in zip(values_log, values, strict=False)
-                )
-                new_el = tuple(
-                    el.at[log_idx].set(e) for el, e in zip(errors_log, errors, strict=False)
-                )
-                new_pl = tuple(
-                    pl.at[log_idx].set(p) for pl, p in zip(precisions_log, precisions, strict=False)
-                )
-                new_dl = tuple(
-                    dl.at[log_idx].set(d) for dl, d in zip(deltas_log, deltas, strict=False)
-                )
+                new_vl = tuple(vl.at[log_idx].set(v) for vl, v in zip(values_log, values))
+                new_el = tuple(el.at[log_idx].set(e) for el, e in zip(errors_log, errors))
+                new_pl = tuple(pl.at[log_idx].set(p) for pl, p in zip(precisions_log, precisions))
+                new_dl = tuple(dl.at[log_idx].set(d) for dl, d in zip(deltas_log, deltas))
                 return new_energies, new_vl, new_el, new_pl, new_dl
 
             def _skip_log(_):
@@ -2354,17 +2156,14 @@ def run_batch(
             init_deltas = _compute_deltas(errors, precisions)
             init_energy = _compute_energy(errors, precisions, predict_pre_scales)
             energies = energies.at[0].set(init_energy)
-            values_log = tuple(vl.at[0].set(v) for vl, v in zip(values_log, values, strict=False))
-            errors_log = tuple(el.at[0].set(e) for el, e in zip(errors_log, errors, strict=False))
-            precisions_log = tuple(
-                pl.at[0].set(p) for pl, p in zip(precisions_log, precisions, strict=False)
-            )
-            deltas_log = tuple(
-                dl.at[0].set(d) for dl, d in zip(deltas_log, init_deltas, strict=False)
-            )
+            values_log = tuple(vl.at[0].set(v) for vl, v in zip(values_log, values))
+            errors_log = tuple(el.at[0].set(e) for el, e in zip(errors_log, errors))
+            precisions_log = tuple(pl.at[0].set(p) for pl, p in zip(precisions_log, precisions))
+            deltas_log = tuple(dl.at[0].set(d) for dl, d in zip(deltas_log, init_deltas))
 
         # Phase 1: Inference-only iterations
         if n_iterations > 0:
+
             if convergence_threshold > 0:
                 # Full inference body with convergence checking
                 def inference_body(i, carry):
@@ -2375,19 +2174,7 @@ def run_batch(
                     # (which is () for dropped node-types) cannot stand in here.
                     # The carry-out is still written into hist at the bottom so a
                     # downstream learning/precision step reconstructs correctly.
-                    (
-                        values,
-                        errors,
-                        precisions,
-                        energies_list,
-                        values_log,
-                        errors_log,
-                        precisions_log,
-                        deltas_log,
-                        converged,
-                        vos,
-                        hist,
-                    ) = carry
+                    values, errors, precisions, energies_list, values_log, errors_log, precisions_log, deltas_log, converged, vos, hist = carry
 
                     t = i // iters_per_timestep
                     clamped_t = tuple(c[:, t, :] for c in clamped)
@@ -2399,7 +2186,8 @@ def run_batch(
                     # according to per-layer Bernoulli mask. dropped dims are
                     # held at 0 throughout the iteration; gradient on them is 0.
                     values = tuple(
-                        jnp.where(clamped_t[j] > 0.5, values[j], values[j] * _dropout_masks[j])
+                        jnp.where(clamped_t[j] > 0.5, values[j],
+                                  values[j] * _dropout_masks[j])
                         for j in range(n_layers)
                     )
                     # Advance value delay rings from the post-clamp carry-in.
@@ -2413,32 +2201,17 @@ def run_batch(
                     def do_step(operand):
                         v, e, prec, vos = operand
                         new_v, pre_e, pre_prec, energy, new_vos = _inference_step(
-                            v,
-                            e,
-                            clamped_t,
-                            predict_weights,
-                            predict_biases,
-                            project_weights,
-                            project_biases,
-                            modulate_weights,
-                            modulate_biases,
-                            precision_weights,
-                            precision_biases,
+                            v, e, clamped_t,
+                            predict_weights, predict_biases,
+                            project_weights, project_biases,
+                            modulate_weights, modulate_biases,
+                            precision_weights, precision_biases,
                             predict_conns,
-                            project_conns_internal,
-                            project_conns_value,
-                            modulate_conns_internal,
-                            modulate_conns_value,
-                            activation_fns,
-                            _values_optimizer,
-                            vos,
-                            is_poisson_types,
-                            iter_key,
+                            project_conns_internal, project_conns_value,
+                            modulate_conns_internal, modulate_conns_value,
+                            activation_fns, _values_optimizer, vos, is_poisson_types, iter_key,
                             is_stochastic,
-                            spatial_layers,
-                            spatial_neighborhoods,
-                            inference_regs,
-                            labels,
+                            spatial_layers, spatial_neighborhoods, inference_regs, labels,
                             project_conns_precision=project_conns_precision,
                             modulate_conns_precision=modulate_conns_precision,
                             modulate_conns_flow_pre=modulate_conns_flow_pre,
@@ -2451,38 +2224,25 @@ def run_batch(
                             precisions=prec,
                             layer_activations=_layer_acts,
                             is_boundary=is_boundary,
-                            hist=hist,
-                            tick_base=0,
-                            iter_idx=i,
+                            hist=hist, tick_base=0, iter_idx=i,
                             iters_per_timestep=iters_per_timestep,
                         )
                         new_e, new_prec = _recompute_errors_precisions(
-                            new_v,
-                            predict_conns,
-                            predict_weights,
-                            predict_biases,
-                            precision_weights,
-                            precision_biases,
-                            activation_fns,
+                            new_v, predict_conns, predict_weights, predict_biases,
+                            precision_weights, precision_biases, activation_fns,
                             predict_error_activations=predict_error_activations,
                             prev_errors=e,
                             predict_precision_activations=predict_precision_activations,
                             prev_precisions=prec,
-                            project_weights=project_weights,
-                            modulate_weights=modulate_weights,
-                            project_biases=project_biases,
-                            modulate_biases=modulate_biases,
+                            project_weights=project_weights, modulate_weights=modulate_weights,
+                            project_biases=project_biases, modulate_biases=modulate_biases,
                             project_conns_precision=project_conns_precision,
                             modulate_conns_precision=modulate_conns_precision,
                             project_conns_internal=project_conns_internal,
                             modulate_conns_internal=modulate_conns_internal,
-                            is_stochastic=is_stochastic,
-                            key=iter_key,
-                            hist=hist,
-                            tick_base=0,
-                            iter_idx=i,
-                            iters_per_timestep=iters_per_timestep,
-                        )
+                            is_stochastic=is_stochastic, key=iter_key,
+                            hist=hist, tick_base=0, iter_idx=i,
+                            iters_per_timestep=iters_per_timestep)
                         return new_v, new_e, new_prec, new_vos
 
                     def skip_step(operand):
@@ -2498,9 +2258,8 @@ def run_batch(
                     # defeating the dropout). Done BEFORE logging so the log
                     # reflects the actual masked state used by inference.
                     new_values = tuple(
-                        jnp.where(
-                            clamped_t[j] > 0.5, new_values[j], new_values[j] * _dropout_masks[j]
-                        )
+                        jnp.where(clamped_t[j] > 0.5, new_values[j],
+                                  new_values[j] * _dropout_masks[j])
                         for j in range(n_layers)
                     )
 
@@ -2509,20 +2268,14 @@ def run_batch(
                         delta = jnp.max(jnp.abs(new_values[j] - values[j]))
                         max_delta = jnp.maximum(max_delta, delta)
                     new_converged = jnp.logical_and(
-                        convergence_threshold > 0.0, max_delta < convergence_threshold
+                        convergence_threshold > 0.0,
+                        max_delta < convergence_threshold
                     )
                     converged = jnp.logical_or(converged, new_converged)
 
                     energies_list, values_log, errors_log, precisions_log, deltas_log = _state_log(
-                        i,
-                        energies_list,
-                        values_log,
-                        errors_log,
-                        precisions_log,
-                        deltas_log,
-                        new_values,
-                        new_errors,
-                        new_precisions,
+                        i, energies_list, values_log, errors_log, precisions_log, deltas_log,
+                        new_values, new_errors, new_precisions
                     )
                     converged = jnp.logical_or(converged, jnp.isnan(energies_list[-1]))
                     # Bottom write: mirror the full carry-out into the hist rings
@@ -2530,63 +2283,16 @@ def run_batch(
                     # reconstructs its prev from hist, stays consistent. No-op for
                     # dropped node-types.
                     hist = _write_hist_ep(hist, new_errors, new_precisions, i)
-                    return (
-                        new_values,
-                        new_errors,
-                        new_precisions,
-                        energies_list,
-                        values_log,
-                        errors_log,
-                        precisions_log,
-                        deltas_log,
-                        converged,
-                        new_vos,
-                        hist,
-                    )
+                    return new_values, new_errors, new_precisions, energies_list, values_log, errors_log, precisions_log, deltas_log, converged, new_vos, hist
 
-                (
-                    values,
-                    errors,
-                    precisions,
-                    energies,
-                    values_log,
-                    errors_log,
-                    precisions_log,
-                    deltas_log,
-                    _,
-                    _values_opt_state,
-                    hist,
-                ) = lax.fori_loop(
-                    0,
-                    n_iterations,
-                    inference_body,
-                    (
-                        values,
-                        errors,
-                        precisions,
-                        energies,
-                        values_log,
-                        errors_log,
-                        precisions_log,
-                        deltas_log,
-                        jnp.bool_(False),
-                        _values_opt_state,
-                        hist,
-                    ),
+                values, errors, precisions, energies, values_log, errors_log, precisions_log, deltas_log, _, _values_opt_state, hist = lax.fori_loop(
+                    0, n_iterations, inference_body,
+                    (values, errors, precisions, energies, values_log, errors_log, precisions_log, deltas_log, jnp.bool_(False), _values_opt_state, hist)
                 )
             else:
                 # Fast inference body: no convergence check, merged recompute+log via lax.cond
                 def inference_body_fast(i, carry):
-                    (
-                        values,
-                        energies_list,
-                        values_log,
-                        errors_log,
-                        precisions_log,
-                        deltas_log,
-                        vos,
-                        hist,
-                    ) = carry
+                    values, energies_list, values_log, errors_log, precisions_log, deltas_log, vos, hist = carry
 
                     t = i // iters_per_timestep
                     clamped_t = tuple(c[:, t, :] for c in clamped)
@@ -2595,7 +2301,8 @@ def run_batch(
                         for j in range(n_layers)
                     )
                     values = tuple(
-                        jnp.where(clamped_t[j] > 0.5, values[j], values[j] * _dropout_masks[j])
+                        jnp.where(clamped_t[j] > 0.5, values[j],
+                                  values[j] * _dropout_masks[j])
                         for j in range(n_layers)
                     )
                     # Advance value delay rings from the post-clamp carry-in.
@@ -2608,32 +2315,17 @@ def run_batch(
                     is_boundary = _timestep_boundary(i)
 
                     new_values, pre_errors, pre_precisions, energy, new_vos = _inference_step(
-                        values,
-                        errors,
-                        clamped_t,
-                        predict_weights,
-                        predict_biases,
-                        project_weights,
-                        project_biases,
-                        modulate_weights,
-                        modulate_biases,
-                        precision_weights,
-                        precision_biases,
+                        values, errors, clamped_t,
+                        predict_weights, predict_biases,
+                        project_weights, project_biases,
+                        modulate_weights, modulate_biases,
+                        precision_weights, precision_biases,
                         predict_conns,
-                        project_conns_internal,
-                        project_conns_value,
-                        modulate_conns_internal,
-                        modulate_conns_value,
-                        activation_fns,
-                        _values_optimizer,
-                        vos,
-                        is_poisson_types,
-                        iter_key,
+                        project_conns_internal, project_conns_value,
+                        modulate_conns_internal, modulate_conns_value,
+                        activation_fns, _values_optimizer, vos, is_poisson_types, iter_key,
                         is_stochastic,
-                        spatial_layers,
-                        spatial_neighborhoods,
-                        inference_regs,
-                        labels,
+                        spatial_layers, spatial_neighborhoods, inference_regs, labels,
                         project_conns_precision=project_conns_precision,
                         modulate_conns_precision=modulate_conns_precision,
                         modulate_conns_flow_pre=modulate_conns_flow_pre,
@@ -2646,18 +2338,15 @@ def run_batch(
                         precisions=precisions,
                         layer_activations=_layer_acts,
                         is_boundary=is_boundary,
-                        hist=hist,
-                        tick_base=0,
-                        iter_idx=i,
+                        hist=hist, tick_base=0, iter_idx=i,
                         iters_per_timestep=iters_per_timestep,
                     )
 
                     # Re-apply dropout mask BEFORE logging so the log reflects
                     # the actual values carried into the next iteration.
                     new_values = tuple(
-                        jnp.where(
-                            clamped_t[j] > 0.5, new_values[j], new_values[j] * _dropout_masks[j]
-                        )
+                        jnp.where(clamped_t[j] > 0.5, new_values[j],
+                                  new_values[j] * _dropout_masks[j])
                         for j in range(n_layers)
                     )
 
@@ -2665,175 +2354,82 @@ def run_batch(
 
                     if _has_pm_error_reading:
                         new_errors, new_precisions = _recompute_errors_precisions(
-                            new_values,
-                            predict_conns,
-                            predict_weights,
-                            predict_biases,
-                            precision_weights,
-                            precision_biases,
-                            activation_fns,
+                            new_values, predict_conns, predict_weights, predict_biases,
+                            precision_weights, precision_biases, activation_fns,
                             predict_error_activations=predict_error_activations,
                             prev_errors=errors,
                             predict_precision_activations=predict_precision_activations,
                             prev_precisions=precisions,
-                            project_weights=project_weights,
-                            modulate_weights=modulate_weights,
-                            project_biases=project_biases,
-                            modulate_biases=modulate_biases,
+                            project_weights=project_weights, modulate_weights=modulate_weights,
+                            project_biases=project_biases, modulate_biases=modulate_biases,
                             project_conns_precision=project_conns_precision,
                             modulate_conns_precision=modulate_conns_precision,
                             project_conns_internal=project_conns_internal,
                             modulate_conns_internal=modulate_conns_internal,
-                            is_stochastic=is_stochastic,
-                            key=iter_key,
-                            hist=hist,
-                            tick_base=0,
-                            iter_idx=i,
-                            iters_per_timestep=iters_per_timestep,
-                        )
-                        energies_list, values_log, errors_log, precisions_log, deltas_log = (
-                            _state_log(
-                                i,
-                                energies_list,
-                                values_log,
-                                errors_log,
-                                precisions_log,
-                                deltas_log,
-                                new_values,
-                                new_errors,
-                                new_precisions,
-                            )
+                            is_stochastic=is_stochastic, key=iter_key,
+                            hist=hist, tick_base=0, iter_idx=i,
+                            iters_per_timestep=iters_per_timestep)
+                        energies_list, values_log, errors_log, precisions_log, deltas_log = _state_log(
+                            i, energies_list, values_log, errors_log, precisions_log, deltas_log,
+                            new_values, new_errors, new_precisions
                         )
                     else:
                         log_idx = i // log_every + log_initial_offset
-
                         def _do_recompute_and_log(_):
                             ne, np_ = _recompute_errors_precisions(
-                                new_values,
-                                predict_conns,
-                                predict_weights,
-                                predict_biases,
-                                precision_weights,
-                                precision_biases,
-                                activation_fns,
+                                new_values, predict_conns, predict_weights, predict_biases,
+                                precision_weights, precision_biases, activation_fns,
                                 predict_error_activations=predict_error_activations,
                                 prev_errors=errors,
                                 predict_precision_activations=predict_precision_activations,
                                 prev_precisions=precisions,
-                                project_weights=project_weights,
-                                modulate_weights=modulate_weights,
-                                project_biases=project_biases,
-                                modulate_biases=modulate_biases,
+                                project_weights=project_weights, modulate_weights=modulate_weights,
+                                project_biases=project_biases, modulate_biases=modulate_biases,
                                 project_conns_precision=project_conns_precision,
                                 modulate_conns_precision=modulate_conns_precision,
                                 project_conns_internal=project_conns_internal,
                                 modulate_conns_internal=modulate_conns_internal,
-                                is_stochastic=is_stochastic,
-                                key=iter_key,
-                                hist=hist,
-                                tick_base=0,
-                                iter_idx=i,
-                                iters_per_timestep=iters_per_timestep,
-                            )
+                                is_stochastic=is_stochastic, key=iter_key,
+                                hist=hist, tick_base=0, iter_idx=i,
+                                iters_per_timestep=iters_per_timestep)
                             energy = _compute_energy(ne, np_)
                             nd_ = _compute_deltas(ne, np_)
                             new_energies = energies_list.at[log_idx].set(energy)
-                            new_vl = tuple(
-                                vl.at[log_idx].set(v)
-                                for vl, v in zip(values_log, new_values, strict=False)
-                            )
-                            new_el = tuple(
-                                el.at[log_idx].set(e) for el, e in zip(errors_log, ne, strict=False)
-                            )
-                            new_pl = tuple(
-                                pl.at[log_idx].set(p)
-                                for pl, p in zip(precisions_log, np_, strict=False)
-                            )
-                            new_dl = tuple(
-                                dl.at[log_idx].set(d)
-                                for dl, d in zip(deltas_log, nd_, strict=False)
-                            )
+                            new_vl = tuple(vl.at[log_idx].set(v) for vl, v in zip(values_log, new_values))
+                            new_el = tuple(el.at[log_idx].set(e) for el, e in zip(errors_log, ne))
+                            new_pl = tuple(pl.at[log_idx].set(p) for pl, p in zip(precisions_log, np_))
+                            new_dl = tuple(dl.at[log_idx].set(d) for dl, d in zip(deltas_log, nd_))
                             return ne, np_, new_energies, new_vl, new_el, new_pl, new_dl
 
                         def _skip_all(_):
-                            return (
-                                pre_errors,
-                                pre_precisions,
-                                energies_list,
-                                values_log,
-                                errors_log,
-                                precisions_log,
-                                deltas_log,
-                            )
+                            return pre_errors, pre_precisions, energies_list, values_log, errors_log, precisions_log, deltas_log
 
-                        (
-                            new_errors,
-                            new_precisions,
-                            energies_list,
-                            values_log,
-                            errors_log,
-                            precisions_log,
-                            deltas_log,
-                        ) = lax.cond(should_log, _do_recompute_and_log, _skip_all, None)
+                        new_errors, new_precisions, energies_list, values_log, errors_log, precisions_log, deltas_log = lax.cond(
+                            should_log, _do_recompute_and_log, _skip_all, None)
 
                     # Bottom write: store the carry-out errors/precisions (E[i+1]).
                     hist = _write_hist_ep(hist, new_errors, new_precisions, i)
-                    return (
-                        new_values,
-                        energies_list,
-                        values_log,
-                        errors_log,
-                        precisions_log,
-                        deltas_log,
-                        new_vos,
-                        hist,
-                    )
+                    return new_values, energies_list, values_log, errors_log, precisions_log, deltas_log, new_vos, hist
 
-                (
-                    values,
-                    energies,
-                    values_log,
-                    errors_log,
-                    precisions_log,
-                    deltas_log,
-                    _values_opt_state,
-                    hist,
-                ) = lax.fori_loop(
-                    0,
-                    n_iterations,
-                    inference_body_fast,
-                    (
-                        values,
-                        energies,
-                        values_log,
-                        errors_log,
-                        precisions_log,
-                        deltas_log,
-                        _values_opt_state,
-                        hist,
-                    ),
+                values, energies, values_log, errors_log, precisions_log, deltas_log, _values_opt_state, hist = lax.fori_loop(
+                    0, n_iterations, inference_body_fast,
+                    (values, energies, values_log, errors_log, precisions_log, deltas_log, _values_opt_state, hist)
                 )
 
         # Resolve params optimizer
         new_params_opt_state = params_opt_state
         if learning:
-            _params_optimizer = (
-                params_optimizer if params_optimizer is not None else optax.adam(1e-4)
-            )
+            _params_optimizer = params_optimizer if params_optimizer is not None else optax.adam(1e-4)
             if params_opt_state is None:
                 _trainable = {
-                    "predict_weights": predict_weights,
-                    "predict_biases": predict_biases,
-                    "project_biases": project_biases,
-                    "modulate_biases": modulate_biases,
-                    "precision_weights": precision_weights,
-                    "precision_biases": precision_biases,
-                    "gd_loss_project_weights": tuple(
-                        project_weights[idx] for idx, _ in gd_loss_project
-                    ),
-                    "gd_loss_modulate_weights": tuple(
-                        modulate_weights[idx] for idx, _ in gd_loss_modulate
-                    ),
+                    'predict_weights': tuple(learnable_leaf(w) for w in predict_weights),
+                    'predict_biases': predict_biases,
+                    'project_biases': project_biases,
+                    'modulate_biases': modulate_biases,
+                    'precision_weights': precision_weights,
+                    'precision_biases': precision_biases,
+                    'gd_loss_project_weights': tuple(learnable_leaf(project_weights[idx]) for idx, _ in gd_loss_project),
+                    'gd_loss_modulate_weights': tuple(learnable_leaf(modulate_weights[idx]) for idx, _ in gd_loss_modulate),
                 }
                 new_params_opt_state = _params_optimizer.init(_trainable)
 
@@ -2846,55 +2442,26 @@ def run_batch(
                 # error/precision carries from the rings inference left behind.
                 errors = _reconstruct_ep(hist, err_buf_idx, n_iterations, 0)
                 precisions = _reconstruct_ep(hist, prec_buf_idx, n_iterations, 0)
-                (
-                    values,
-                    errors,
-                    precisions,
-                    predict_weights,
-                    predict_biases,
-                    project_weights,
-                    project_biases,
-                    modulate_weights,
-                    modulate_biases,
-                    precision_weights,
-                    precision_biases,
-                    _values_opt_state,
-                    new_params_opt_state,
-                ) = _combined_step(
-                    values,
-                    errors,
-                    clamped_last,
-                    predict_weights,
-                    predict_biases,
-                    project_weights,
-                    project_biases,
-                    modulate_weights,
-                    modulate_biases,
-                    precision_weights,
-                    precision_biases,
-                    predict_conns,
-                    project_conns,
-                    modulate_conns,
-                    project_conns_internal,
-                    project_conns_value,
-                    modulate_conns_internal,
-                    modulate_conns_value,
-                    activation_fns,
-                    _values_optimizer,
-                    _values_opt_state,
-                    _params_optimizer,
-                    new_params_opt_state,
-                    gd_loss_project,
-                    gd_loss_modulate,
-                    reward_fns,
-                    loss_fns,
-                    loss_fn_sample_arrays,
-                    spatial_layers,
-                    spatial_neighborhoods,
-                    inference_regs,
-                    train_regs,
-                    learn_key,
-                    labels,
+                (values, errors, precisions,
+                 predict_weights, predict_biases,
+                 project_weights, project_biases,
+                 modulate_weights, modulate_biases,
+                 precision_weights, precision_biases,
+                 _values_opt_state, new_params_opt_state) = _combined_step(
+                    values, errors, clamped_last,
+                    predict_weights, predict_biases,
+                    project_weights, project_biases,
+                    modulate_weights, modulate_biases,
+                    precision_weights, precision_biases,
+                    predict_conns, project_conns, modulate_conns,
+                    project_conns_internal, project_conns_value,
+                    modulate_conns_internal, modulate_conns_value,
+                    activation_fns, _values_optimizer, _values_opt_state,
+                    _params_optimizer, new_params_opt_state,
+                    gd_loss_project, gd_loss_modulate,
+                    reward_fns, loss_fns, loss_fn_sample_arrays,
+                    spatial_layers, spatial_neighborhoods,
+                    inference_regs, train_regs, learn_key, labels,
                     is_boundary=_not_a_boundary,
                     project_conns_precision=project_conns_precision,
                     modulate_conns_precision=modulate_conns_precision,
@@ -2913,9 +2480,7 @@ def run_batch(
                     is_stochastic=is_stochastic,
                     # Equilibrium learning step after the sequence: read delayed
                     # from the rings left by inference (no new write here).
-                    hist=hist,
-                    tick_base=n_iterations,
-                    iter_idx=0,
+                    hist=hist, tick_base=n_iterations, iter_idx=0,
                     iters_per_timestep=iters_per_timestep,
                 )
                 # errors/precisions are pre-update; not used after this point
@@ -2925,25 +2490,7 @@ def run_batch(
                 # feedback loop.  A single precision update happens after
                 # the loop via a final combined_step with update_precision=True.
                 def learning_body(i, carry):
-                    (
-                        values,
-                        energies_list,
-                        values_log,
-                        errors_log,
-                        precisions_log,
-                        deltas_log,
-                        pw,
-                        pb,
-                        prw,
-                        prb,
-                        mw,
-                        mb,
-                        ppw,
-                        ppb,
-                        params_opt_st,
-                        vos,
-                        hist,
-                    ) = carry
+                    values, energies_list, values_log, errors_log, precisions_log, deltas_log, pw, pb, prw, prb, mw, mb, ppw, ppb, params_opt_st, vos, hist = carry
 
                     t = (n_iterations + i) // iters_per_timestep
                     clamped_t = tuple(c[:, t, :] for c in clamped)
@@ -2952,7 +2499,8 @@ def run_batch(
                         for j in range(n_layers)
                     )
                     values = tuple(
-                        jnp.where(clamped_t[j] > 0.5, values[j], values[j] * _dropout_masks[j])
+                        jnp.where(clamped_t[j] > 0.5, values[j],
+                                  values[j] * _dropout_masks[j])
                         for j in range(n_layers)
                     )
                     # Advance value delay rings; learning loop offsets by n_iterations.
@@ -2963,55 +2511,20 @@ def run_batch(
 
                     learn_key = jax.random.fold_in(key, n_iterations + i)
                     is_boundary = _timestep_boundary(n_iterations + i)
-                    (
-                        values,
-                        pre_errors,
-                        pre_precisions,
-                        pw,
-                        pb,
-                        prw,
-                        prb,
-                        mw,
-                        mb,
-                        ppw,
-                        ppb,
-                        vos,
-                        params_opt_st,
-                    ) = _combined_step(
-                        values,
-                        errors,
-                        clamped_t,
-                        pw,
-                        pb,
-                        prw,
-                        prb,
-                        mw,
-                        mb,
-                        ppw,
-                        ppb,
-                        predict_conns,
-                        project_conns,
-                        modulate_conns,
-                        project_conns_internal,
-                        project_conns_value,
-                        modulate_conns_internal,
-                        modulate_conns_value,
-                        activation_fns,
-                        _values_optimizer,
-                        vos,
-                        _params_optimizer,
-                        params_opt_st,
-                        gd_loss_project,
-                        gd_loss_modulate,
-                        reward_fns,
-                        loss_fns,
-                        loss_fn_sample_arrays,
-                        spatial_layers,
-                        spatial_neighborhoods,
-                        inference_regs,
-                        train_regs,
-                        learn_key,
-                        labels,
+                    (values, pre_errors, pre_precisions,
+                     pw, pb, prw, prb, mw, mb, ppw, ppb,
+                     vos, params_opt_st) = _combined_step(
+                        values, errors, clamped_t,
+                        pw, pb, prw, prb, mw, mb, ppw, ppb,
+                        predict_conns, project_conns, modulate_conns,
+                        project_conns_internal, project_conns_value,
+                        modulate_conns_internal, modulate_conns_value,
+                        activation_fns, _values_optimizer, vos,
+                        _params_optimizer, params_opt_st,
+                        gd_loss_project, gd_loss_modulate,
+                        reward_fns, loss_fns, loss_fn_sample_arrays,
+                        spatial_layers, spatial_neighborhoods,
+                        inference_regs, train_regs, learn_key, labels,
                         update_precision=False,
                         is_stochastic=is_stochastic,
                         project_conns_precision=project_conns_precision,
@@ -3029,15 +2542,14 @@ def run_batch(
                         prev_precisions=precisions,
                         layer_activations=_layer_acts,
                         is_boundary=is_boundary,
-                        hist=hist,
-                        tick_base=n_iterations,
-                        iter_idx=i,
+                        hist=hist, tick_base=n_iterations, iter_idx=i,
                         iters_per_timestep=iters_per_timestep,
                     )
 
                     # Re-apply dropout mask BEFORE logging.
                     values = tuple(
-                        jnp.where(clamped_t[j] > 0.5, values[j], values[j] * _dropout_masks[j])
+                        jnp.where(clamped_t[j] > 0.5, values[j],
+                                  values[j] * _dropout_masks[j])
                         for j in range(n_layers)
                     )
 
@@ -3045,249 +2557,115 @@ def run_batch(
 
                     if _has_pm_error_reading:
                         errors, precisions = _recompute_errors_precisions(
-                            values,
-                            predict_conns,
-                            tuple(pw),
-                            tuple(pb),
-                            tuple(ppw),
-                            tuple(ppb),
+                            values, predict_conns,
+                            tuple(pw), tuple(pb), tuple(ppw), tuple(ppb),
                             activation_fns,
                             predict_error_activations=predict_error_activations,
                             prev_errors=errors,
                             predict_precision_activations=predict_precision_activations,
                             prev_precisions=precisions,
-                            project_weights=prw,
-                            modulate_weights=mw,
-                            project_biases=prb,
-                            modulate_biases=mb,
+                            project_weights=prw, modulate_weights=mw,
+                            project_biases=prb, modulate_biases=mb,
                             project_conns_precision=project_conns_precision,
                             modulate_conns_precision=modulate_conns_precision,
                             project_conns_internal=project_conns_internal,
                             modulate_conns_internal=modulate_conns_internal,
-                            is_stochastic=is_stochastic,
-                            key=learn_key,
-                            hist=hist,
-                            tick_base=n_iterations,
-                            iter_idx=i,
-                            iters_per_timestep=iters_per_timestep,
-                        )
-                        energies_list, values_log, errors_log, precisions_log, deltas_log = (
-                            _state_log(
-                                n_iterations + i,
-                                energies_list,
-                                values_log,
-                                errors_log,
-                                precisions_log,
-                                deltas_log,
-                                values,
-                                errors,
-                                precisions,
-                            )
+                            is_stochastic=is_stochastic, key=learn_key,
+                            hist=hist, tick_base=n_iterations, iter_idx=i,
+                            iters_per_timestep=iters_per_timestep)
+                        energies_list, values_log, errors_log, precisions_log, deltas_log = _state_log(
+                            n_iterations + i, energies_list, values_log, errors_log, precisions_log, deltas_log,
+                            values, errors, precisions
                         )
                     else:
                         log_idx = (n_iterations + i) // log_every + log_initial_offset
                         _prev_errors_for_log = errors
                         _prev_precisions_for_log = precisions
-
                         def _do_recompute_and_log(_):
                             ne, np_ = _recompute_errors_precisions(
-                                values,
-                                predict_conns,
-                                tuple(pw),
-                                tuple(pb),
-                                tuple(ppw),
-                                tuple(ppb),
+                                values, predict_conns,
+                                tuple(pw), tuple(pb), tuple(ppw), tuple(ppb),
                                 activation_fns,
                                 predict_error_activations=predict_error_activations,
                                 prev_errors=_prev_errors_for_log,
                                 predict_precision_activations=predict_precision_activations,
                                 prev_precisions=_prev_precisions_for_log,
-                                project_weights=prw,
-                                modulate_weights=mw,
-                                project_biases=prb,
-                                modulate_biases=mb,
+                                project_weights=prw, modulate_weights=mw,
+                                project_biases=prb, modulate_biases=mb,
                                 project_conns_precision=project_conns_precision,
                                 modulate_conns_precision=modulate_conns_precision,
                                 project_conns_internal=project_conns_internal,
                                 modulate_conns_internal=modulate_conns_internal,
-                                is_stochastic=is_stochastic,
-                                key=learn_key,
-                                hist=hist,
-                                tick_base=n_iterations,
-                                iter_idx=i,
-                                iters_per_timestep=iters_per_timestep,
-                            )
+                                is_stochastic=is_stochastic, key=learn_key,
+                                hist=hist, tick_base=n_iterations, iter_idx=i,
+                                iters_per_timestep=iters_per_timestep)
                             energy = _compute_energy(ne, np_, predict_pre_scales)
                             nd_ = _compute_deltas(ne, np_)
                             new_energies = energies_list.at[log_idx].set(energy)
-                            new_vl = tuple(
-                                vl.at[log_idx].set(v)
-                                for vl, v in zip(values_log, values, strict=False)
-                            )
-                            new_el = tuple(
-                                el.at[log_idx].set(e) for el, e in zip(errors_log, ne, strict=False)
-                            )
-                            new_pl = tuple(
-                                pl.at[log_idx].set(p)
-                                for pl, p in zip(precisions_log, np_, strict=False)
-                            )
-                            new_dl = tuple(
-                                dl.at[log_idx].set(d)
-                                for dl, d in zip(deltas_log, nd_, strict=False)
-                            )
+                            new_vl = tuple(vl.at[log_idx].set(v) for vl, v in zip(values_log, values))
+                            new_el = tuple(el.at[log_idx].set(e) for el, e in zip(errors_log, ne))
+                            new_pl = tuple(pl.at[log_idx].set(p) for pl, p in zip(precisions_log, np_))
+                            new_dl = tuple(dl.at[log_idx].set(d) for dl, d in zip(deltas_log, nd_))
                             return ne, np_, new_energies, new_vl, new_el, new_pl, new_dl
 
                         def _skip_all(_):
-                            return (
-                                pre_errors,
-                                pre_precisions,
-                                energies_list,
-                                values_log,
-                                errors_log,
-                                precisions_log,
-                                deltas_log,
-                            )
+                            return pre_errors, pre_precisions, energies_list, values_log, errors_log, precisions_log, deltas_log
 
-                        (
-                            errors,
-                            precisions,
-                            energies_list,
-                            values_log,
-                            errors_log,
-                            precisions_log,
-                            deltas_log,
-                        ) = lax.cond(should_log, _do_recompute_and_log, _skip_all, None)
+                        errors, precisions, energies_list, values_log, errors_log, precisions_log, deltas_log = lax.cond(
+                            should_log, _do_recompute_and_log, _skip_all, None)
                     # Bottom write: store the carry-out errors/precisions.
                     hist = _write_hist_ep(hist, errors, precisions, n_iterations + i)
-                    return (
-                        values,
-                        energies_list,
-                        values_log,
-                        errors_log,
-                        precisions_log,
-                        deltas_log,
-                        pw,
-                        pb,
-                        prw,
-                        prb,
-                        mw,
-                        mb,
-                        ppw,
-                        ppb,
-                        params_opt_st,
-                        vos,
-                        hist,
-                    )
+                    return values, energies_list, values_log, errors_log, precisions_log, deltas_log, pw, pb, prw, prb, mw, mb, ppw, ppb, params_opt_st, vos, hist
 
-                (
-                    values,
-                    energies,
-                    values_log,
-                    errors_log,
-                    precisions_log,
-                    deltas_log,
-                    predict_weights,
-                    predict_biases,
-                    project_weights,
-                    project_biases,
-                    modulate_weights,
-                    modulate_biases,
-                    precision_weights,
-                    precision_biases,
-                    new_params_opt_state,
-                    _values_opt_state,
-                    hist,
-                ) = lax.fori_loop(
-                    0,
-                    n_learning_iterations,
-                    learning_body,
-                    (
-                        values,
-                        energies,
-                        values_log,
-                        errors_log,
-                        precisions_log,
-                        deltas_log,
-                        predict_weights,
-                        predict_biases,
-                        project_weights,
-                        project_biases,
-                        modulate_weights,
-                        modulate_biases,
-                        precision_weights,
-                        precision_biases,
-                        new_params_opt_state,
-                        _values_opt_state,
-                        hist,
-                    ),
+                (values, energies, values_log, errors_log, precisions_log, deltas_log,
+                 predict_weights, predict_biases,
+                 project_weights, project_biases,
+                 modulate_weights, modulate_biases,
+                 precision_weights, precision_biases, new_params_opt_state, _values_opt_state, hist) = lax.fori_loop(
+                    0, n_learning_iterations, learning_body,
+                    (values, energies, values_log, errors_log, precisions_log, deltas_log,
+                     predict_weights, predict_biases,
+                     project_weights, project_biases,
+                     modulate_weights, modulate_biases,
+                     precision_weights, precision_biases, new_params_opt_state, _values_opt_state, hist)
                 )
 
                 # Final step: update precision with the converged values/weights.
                 # This gives precision one gradient step per sample, at the
                 # equilibrium point, rather than N steps during the transient.
                 _has_learnable_prec = any(
-                    c.learn_precision_weights or c.learn_precision_bias for c in predict_conns
-                )
+                    c.learn_precision_weights or c.learn_precision_bias
+                    for c in predict_conns)
                 if _has_learnable_prec:
                     clamped_last = tuple(c[:, -1, :] for c in clamped)
-                    prec_key = jax.random.fold_in(key, n_iterations + n_learning_iterations)
+                    prec_key = jax.random.fold_in(
+                        key, n_iterations + n_learning_iterations)
                     # Reconstruct the one-step carries from the rings the
                     # learning loop left behind (tick_base past its last write).
                     errors = _reconstruct_ep(
-                        hist, err_buf_idx, n_iterations + n_learning_iterations, 0
-                    )
+                        hist, err_buf_idx, n_iterations + n_learning_iterations, 0)
                     precisions = _reconstruct_ep(
-                        hist, prec_buf_idx, n_iterations + n_learning_iterations, 0
-                    )
-                    (
-                        values,
-                        errors,
-                        precisions,
-                        predict_weights,
-                        predict_biases,
-                        project_weights,
-                        project_biases,
-                        modulate_weights,
-                        modulate_biases,
-                        precision_weights,
-                        precision_biases,
-                        _values_opt_state,
-                        new_params_opt_state,
-                    ) = _combined_step(
-                        values,
-                        errors,
-                        clamped_last,
-                        predict_weights,
-                        predict_biases,
-                        project_weights,
-                        project_biases,
-                        modulate_weights,
-                        modulate_biases,
-                        precision_weights,
-                        precision_biases,
-                        predict_conns,
-                        project_conns,
-                        modulate_conns,
-                        project_conns_internal,
-                        project_conns_value,
-                        modulate_conns_internal,
-                        modulate_conns_value,
-                        activation_fns,
-                        _values_optimizer,
-                        _values_opt_state,
-                        _params_optimizer,
-                        new_params_opt_state,
-                        gd_loss_project,
-                        gd_loss_modulate,
-                        reward_fns,
-                        loss_fns,
-                        loss_fn_sample_arrays,
-                        spatial_layers,
-                        spatial_neighborhoods,
-                        inference_regs,
-                        train_regs,
-                        prec_key,
-                        labels,
+                        hist, prec_buf_idx, n_iterations + n_learning_iterations, 0)
+                    (values, errors, precisions,
+                     predict_weights, predict_biases,
+                     project_weights, project_biases,
+                     modulate_weights, modulate_biases,
+                     precision_weights, precision_biases,
+                     _values_opt_state, new_params_opt_state) = _combined_step(
+                        values, errors, clamped_last,
+                        predict_weights, predict_biases,
+                        project_weights, project_biases,
+                        modulate_weights, modulate_biases,
+                        precision_weights, precision_biases,
+                        predict_conns, project_conns, modulate_conns,
+                        project_conns_internal, project_conns_value,
+                        modulate_conns_internal, modulate_conns_value,
+                        activation_fns, _values_optimizer, _values_opt_state,
+                        _params_optimizer, new_params_opt_state,
+                        gd_loss_project, gd_loss_modulate,
+                        reward_fns, loss_fns, loss_fn_sample_arrays,
+                        spatial_layers, spatial_neighborhoods,
+                        inference_regs, train_regs, prec_key, labels,
                         is_boundary=_not_a_boundary,
                         update_precision=True,
                         is_stochastic=is_stochastic,
@@ -3307,10 +2685,8 @@ def run_batch(
                         layer_activations=_layer_acts,
                         # Final precision step after the sequence: read delayed
                         # from the rings left by the learning loop (no new write).
-                        hist=hist,
-                        tick_base=n_iterations + n_learning_iterations,
-                        iter_idx=0,
-                        iters_per_timestep=iters_per_timestep,
+                        hist=hist, tick_base=n_iterations + n_learning_iterations,
+                        iter_idx=0, iters_per_timestep=iters_per_timestep,
                         update_other_params=False,
                     )
 
@@ -3325,13 +2701,4 @@ def run_batch(
         precision_biases=list(precision_biases),
     )
 
-    return (
-        new_params,
-        new_params_opt_state,
-        _values_opt_state,
-        values_log,
-        errors_log,
-        precisions_log,
-        deltas_log,
-        energies,
-    )
+    return new_params, new_params_opt_state, _values_opt_state, values_log, errors_log, precisions_log, deltas_log, energies
