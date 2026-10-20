@@ -1,13 +1,13 @@
-"""
-Edge case tests for lax.scan-based inference and learning loops.
+"""Edge case tests for lax.scan-based inference and learning loops.
 Tests temporal clamping, PM error-reading, convergence, log_every variations,
 and mixed inference+learning phases.
 """
-import pytest
+
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
+import pytest
+
 import pcn
 from pcn.backend.simulation import run_batch
 
@@ -36,7 +36,7 @@ def pm_error_net():
         l_in = pcn.Layer(dim=8, activation=pcn.LeakyRelu(), label="in")
         l_h = pcn.Layer(dim=4, activation=pcn.LeakyRelu(), label="h")
         l_out = pcn.Layer(dim=3, activation=pcn.Softmax(), label="out")
-        p1 = pcn.Predict(l_in, l_h)
+        pcn.Predict(l_in, l_h)
         p2 = pcn.Predict(l_h, l_out)
         pcn.Modulate(l_in, p2.error)
     net.build()
@@ -49,36 +49,47 @@ def _make_sample(batch_size, in_dim, out_dim, key=None):
     k1, k2 = jax.random.split(key)
     images = jax.random.normal(k1, (batch_size, in_dim))
     labels = jax.nn.one_hot(jax.random.randint(k2, (batch_size,), 0, out_dim), out_dim)
-    return {'image': images, 'label': labels}
+    return {"image": images, "label": labels}
 
 
 def _run(net, l_in, l_out, sample, n_iter, log_every, learning, n_learn, convergence=0.0):
-    data_map = ((l_in._idx, 'image'), (l_out._idx, 'label'))
+    data_map = ((l_in._idx, "image"), (l_out._idx, "label"))
     vo = optax.adam(0.5)
     po = optax.adam(1e-3) if learning else None
     return run_batch(
-        sample, net.params, net.structure,
-        data_map, n_iter, log_every,
-        learning=learning, n_learning_iterations=n_learn,
+        sample,
+        net.params,
+        net.structure,
+        data_map,
+        n_iter,
+        log_every,
+        learning=learning,
+        n_learning_iterations=n_learn,
         convergence_threshold=convergence,
         key=jax.random.PRNGKey(1),
-        values_optimizer=vo, values_opt_state=None,
+        values_optimizer=vo,
+        values_opt_state=None,
         params_optimizer=po,
-        params_opt_state=po.init({
-            'predict_weights': tuple(net.params.predict_weights),
-            'predict_biases': tuple(net.params.predict_biases),
-            'project_biases': tuple(net.params.project_biases),
-            'modulate_biases': tuple(net.params.modulate_biases),
-            'precision_weights': tuple(net.params.precision_weights),
-            'precision_biases': tuple(net.params.precision_biases),
-            'gd_loss_project_weights': (),
-            'gd_loss_modulate_weights': (),
-        }) if learning else None,
+        params_opt_state=po.init(
+            {
+                "predict_weights": tuple(net.params.predict_weights),
+                "predict_biases": tuple(net.params.predict_biases),
+                "project_biases": tuple(net.params.project_biases),
+                "modulate_biases": tuple(net.params.modulate_biases),
+                "precision_weights": tuple(net.params.precision_weights),
+                "precision_biases": tuple(net.params.precision_biases),
+                "gd_loss_project_weights": (),
+                "gd_loss_modulate_weights": (),
+            }
+        )
+        if learning
+        else None,
         spatial_neighborhoods=(),
     )
 
 
 # --- Test: scan path with inference only ---
+
 
 class TestScanInference:
     def test_inference_only_basic(self, simple_net):
@@ -119,6 +130,7 @@ class TestScanInference:
 
 # --- Test: scan path with learning only ---
 
+
 class TestScanLearning:
     def test_learning_only(self, simple_net):
         """Learning only (n_iterations=0, n_learning_iterations=5)."""
@@ -130,7 +142,7 @@ class TestScanLearning:
         new_params, _, _, vl, el, pl, _, en = result
         assert en.shape == (1,), f"Expected 1 logged energy, got {en.shape}"
         # Weights should have changed
-        for w_old, w_new in zip(predict_before, new_params.predict_weights):
+        for w_old, w_new in zip(predict_before, new_params.predict_weights, strict=False):
             assert not jnp.allclose(w_old, w_new), "Weights should change after learning"
 
     def test_learning_log_every_1(self, simple_net):
@@ -143,6 +155,7 @@ class TestScanLearning:
 
 
 # --- Test: mixed inference + learning ---
+
 
 class TestScanMixed:
     def test_inference_then_learning(self, simple_net):
@@ -166,7 +179,8 @@ class TestScanMixed:
     def test_mixed_uneven_log(self, simple_net):
         """Mixed with log_every=3, n_iter=2, n_learn=7 -> total=9 -> 3 entries.
         No inference logs (iterations 0,1 never hit (i+1)%3==0).
-        All 3 logs come from learning phase."""
+        All 3 logs come from learning phase.
+        """
         net, l_in, _, l_out = simple_net
         sample = _make_sample(4, 8, 3)
         result = _run(net, l_in, l_out, sample, n_iter=2, log_every=3, learning=True, n_learn=7)
@@ -177,13 +191,23 @@ class TestScanMixed:
 
 # --- Test: convergence path (fori_loop, not scan) ---
 
+
 class TestConvergencePath:
     def test_convergence_basic(self, simple_net):
         """Convergence path should still work (fori_loop)."""
         net, l_in, _, l_out = simple_net
         sample = _make_sample(4, 8, 3)
-        result = _run(net, l_in, l_out, sample, n_iter=10, log_every=10,
-                      learning=False, n_learn=0, convergence=1e-3)
+        result = _run(
+            net,
+            l_in,
+            l_out,
+            sample,
+            n_iter=10,
+            log_every=10,
+            learning=False,
+            n_learn=0,
+            convergence=1e-3,
+        )
         _, _, _, vl, el, pl, _, en = result
         assert en.shape == (1,)
 
@@ -191,13 +215,23 @@ class TestConvergencePath:
         """Convergence path with learning phase."""
         net, l_in, _, l_out = simple_net
         sample = _make_sample(4, 8, 3)
-        result = _run(net, l_in, l_out, sample, n_iter=5, log_every=5,
-                      learning=True, n_learn=5, convergence=1e-3)
+        result = _run(
+            net,
+            l_in,
+            l_out,
+            sample,
+            n_iter=5,
+            log_every=5,
+            learning=True,
+            n_learn=5,
+            convergence=1e-3,
+        )
         new_params, _, _, vl, el, pl, _, en = result
         assert en.shape == (2,)
 
 
 # --- Test: PM error-reading networks ---
+
 
 class TestPMErrorReading:
     def test_pm_inference(self, pm_error_net):
@@ -221,6 +255,7 @@ class TestPMErrorReading:
 
 # --- Test: temporal clamping (3D data) ---
 
+
 class TestTemporalClamping:
     def test_temporal_clamp_inference(self, simple_net):
         """Temporal clamping with 3D input data."""
@@ -231,18 +266,24 @@ class TestTemporalClamping:
         # 3D data: (batch, n_timesteps, dim)
         images_3d = jax.random.normal(jax.random.PRNGKey(0), (batch_size, n_timesteps, 8))
         labels_3d = jnp.broadcast_to(
-            jax.nn.one_hot(jnp.array([0, 1, 2, 0]), 3)[:, None, :],
-            (batch_size, n_timesteps, 3))
-        sample = {'image': images_3d, 'label': labels_3d}
+            jax.nn.one_hot(jnp.array([0, 1, 2, 0]), 3)[:, None, :], (batch_size, n_timesteps, 3)
+        )
+        sample = {"image": images_3d, "label": labels_3d}
 
-        data_map = ((l_in._idx, 'image'), (l_out._idx, 'label'))
+        data_map = ((l_in._idx, "image"), (l_out._idx, "label"))
         vo = optax.adam(0.5)
         result = run_batch(
-            sample, net.params, net.structure,
-            data_map, n_iter, n_iter,
-            learning=False, n_learning_iterations=0,
+            sample,
+            net.params,
+            net.structure,
+            data_map,
+            n_iter,
+            n_iter,
+            learning=False,
+            n_learning_iterations=0,
             key=jax.random.PRNGKey(1),
-            values_optimizer=vo, values_opt_state=None,
+            values_optimizer=vo,
+            values_opt_state=None,
             spatial_neighborhoods=(),
         )
         _, _, _, vl, el, pl, _, en = result
@@ -258,30 +299,38 @@ class TestTemporalClamping:
         n_timesteps = 2  # Must divide total (4+4=8)
         images_3d = jax.random.normal(jax.random.PRNGKey(0), (batch_size, n_timesteps, 8))
         labels_3d = jnp.broadcast_to(
-            jax.nn.one_hot(jnp.array([0, 1, 2, 0]), 3)[:, None, :],
-            (batch_size, n_timesteps, 3))
-        sample = {'image': images_3d, 'label': labels_3d}
+            jax.nn.one_hot(jnp.array([0, 1, 2, 0]), 3)[:, None, :], (batch_size, n_timesteps, 3)
+        )
+        sample = {"image": images_3d, "label": labels_3d}
 
-        data_map = ((l_in._idx, 'image'), (l_out._idx, 'label'))
+        data_map = ((l_in._idx, "image"), (l_out._idx, "label"))
         vo = optax.adam(0.5)
         po = optax.adam(1e-3)
         result = run_batch(
-            sample, net.params, net.structure,
-            data_map, n_iter, n_iter,
-            learning=True, n_learning_iterations=n_learn,
+            sample,
+            net.params,
+            net.structure,
+            data_map,
+            n_iter,
+            n_iter,
+            learning=True,
+            n_learning_iterations=n_learn,
             key=jax.random.PRNGKey(1),
-            values_optimizer=vo, values_opt_state=None,
+            values_optimizer=vo,
+            values_opt_state=None,
             params_optimizer=po,
-            params_opt_state=po.init({
-                'predict_weights': tuple(net.params.predict_weights),
-                'predict_biases': tuple(net.params.predict_biases),
-                'project_biases': tuple(net.params.project_biases),
-                'modulate_biases': tuple(net.params.modulate_biases),
-                'precision_weights': tuple(net.params.precision_weights),
-                'precision_biases': tuple(net.params.precision_biases),
-                'gd_loss_project_weights': (),
-                'gd_loss_modulate_weights': (),
-            }),
+            params_opt_state=po.init(
+                {
+                    "predict_weights": tuple(net.params.predict_weights),
+                    "predict_biases": tuple(net.params.predict_biases),
+                    "project_biases": tuple(net.params.project_biases),
+                    "modulate_biases": tuple(net.params.modulate_biases),
+                    "precision_weights": tuple(net.params.precision_weights),
+                    "precision_biases": tuple(net.params.precision_biases),
+                    "gd_loss_project_weights": (),
+                    "gd_loss_modulate_weights": (),
+                }
+            ),
             spatial_neighborhoods=(),
         )
         new_params, _, _, vl, el, pl, _, en = result
@@ -291,6 +340,7 @@ class TestTemporalClamping:
 
 
 # --- Test: single-pass shortcut ---
+
 
 class TestSinglePassShortcut:
     def test_single_iteration(self, simple_net):

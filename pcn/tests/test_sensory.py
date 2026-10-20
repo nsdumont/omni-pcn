@@ -3,19 +3,31 @@ Tests for the fixed biological sensory front-ends (``VisualInput`` /
 ``AuditoryInput``) and the ``Simulation`` transform hook.
 """
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import pcn
-from pcn.core.sensory.base import SensoryTransform, Sequential
-from pcn.core.sensory.vision import (
-    DoGCenterSurround, GaborBank, DivisiveNormalization, ComplexEnergy,
-    ColorOpponent, GaussianBlur, SpatialPool, ChannelStandardize,
-    ParallelPathways)
 from pcn.core.sensory.audio import (
-    MelPower, PowerCompression, LateralInhibition, LeakyIntegrator, STRFBank)
+    LateralInhibition,
+    LeakyIntegrator,
+    MelPower,
+    PowerCompression,
+    STRFBank,
+)
+from pcn.core.sensory.base import Sequential
+from pcn.core.sensory.vision import (
+    ChannelStandardize,
+    ColorOpponent,
+    ComplexEnergy,
+    DivisiveNormalization,
+    DoGCenterSurround,
+    GaborBank,
+    GaussianBlur,
+    ParallelPathways,
+    SpatialPool,
+)
 
 
 def _corr(a, b):
@@ -28,8 +40,8 @@ def _corr(a, b):
 #  Vision transform                                                           #
 # --------------------------------------------------------------------------- #
 
-class TestVisionTransform:
 
+class TestVisionTransform:
     def test_default_shapes(self):
         hw = (28, 28)
         t = Sequential([DoGCenterSurround(hw), GaborBank(hw)])
@@ -114,20 +126,21 @@ class TestEncoderStages:
         hw = (32, 32)
         form = Sequential([DoGCenterSurround(hw), GaborBank(hw)])
         blur = GaussianBlur(hw, 1, sigma=2.0)
-        paths = [dict(in_start=0, in_len=1, transform=form, invertible=False),
-                 dict(in_start=0, in_len=1, transform=blur,
-                      invertible=True, lowpass=True)]
+        paths = [
+            {"in_start": 0, "in_len": 1, "transform": form, "invertible": False},
+            {"in_start": 0, "in_len": 1, "transform": blur, "invertible": True, "lowpass": True},
+        ]
         rng = np.random.RandomState(0)
         x = jnp.asarray(rng.rand(2, 1, *hw).astype(np.float32))
 
-        pp_low = ParallelPathways(hw, 1, paths)                  # default: off
+        pp_low = ParallelPathways(hw, 1, paths)  # default: off
         pp_x = ParallelPathways(hw, 1, paths, crossover=True)
         assert pp_low.crossover is False and pp_x.crossover is True
         assert pp_low.forward(x).shape == pp_x.forward(x).shape
 
         err_low = float(jnp.mean((pp_low.inverse(pp_low.forward(x)) - x) ** 2))
         err_x = float(jnp.mean((pp_x.inverse(pp_x.forward(x)) - x) ** 2))
-        assert err_x < err_low / 100.0                            # ~1e-9 vs ~4e-3
+        assert err_x < err_low / 100.0  # ~1e-9 vs ~4e-3
 
     def test_parallel_pathways_crossover_band_pass_only_slice(self):
         """A slice fed only by the band-pass pathway falls back to its inverse.
@@ -137,12 +150,11 @@ class TestEncoderStages:
         """
         hw = (32, 32)
         form = Sequential([DoGCenterSurround(hw), GaborBank(hw)])
-        paths = [dict(in_start=0, in_len=1, transform=form, invertible=False)]
+        paths = [{"in_start": 0, "in_len": 1, "transform": form, "invertible": False}]
         x = jnp.asarray(np.random.RandomState(1).rand(2, 1, *hw).astype(np.float32))
 
-        off = ParallelPathways(hw, 1, paths).inverse(
-            ParallelPathways(hw, 1, paths).forward(x))
-        assert jnp.allclose(off, 0.0)                             # nothing to invert
+        off = ParallelPathways(hw, 1, paths).inverse(ParallelPathways(hw, 1, paths).forward(x))
+        assert jnp.allclose(off, 0.0)  # nothing to invert
         pp = ParallelPathways(hw, 1, paths, crossover=True)
         assert _corr(pp.inverse(pp.forward(x)), x) > 0.99
 
@@ -150,19 +162,26 @@ class TestEncoderStages:
         """VisualInput enables the crossover only where it is measurably better."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            plain = pcn.VisualInput(in_shape=(1, 32, 32), color='gray',
-                                    downsample=1, keep_lowpass=True)
-            pooled = pcn.VisualInput(in_shape=(1, 32, 32), color='gray',
-                                     downsample=2, keep_lowpass=True)
-            phaseless = pcn.VisualInput(in_shape=(1, 32, 32), color='gray',
-                                        downsample=1, keep_lowpass=True,
-                                        complex_cells=True)
+            plain = pcn.VisualInput(
+                in_shape=(1, 32, 32), color="gray", downsample=1, keep_lowpass=True
+            )
+            pooled = pcn.VisualInput(
+                in_shape=(1, 32, 32), color="gray", downsample=2, keep_lowpass=True
+            )
+            phaseless = pcn.VisualInput(
+                in_shape=(1, 32, 32),
+                color="gray",
+                downsample=1,
+                keep_lowpass=True,
+                complex_cells=True,
+            )
+
         def pp(vi):
-            return [s for s in vi.transform.stages
-                    if isinstance(s, ParallelPathways)][0]
+            return [s for s in vi.transform.stages if isinstance(s, ParallelPathways)][0]
+
         assert pp(plain).crossover is True
-        assert pp(pooled).crossover is False       # pooled band-pass is blocky
-        assert pp(phaseless).crossover is False    # form inverse is identically 0
+        assert pp(pooled).crossover is False  # pooled band-pass is blocky
+        assert pp(phaseless).crossover is False  # form inverse is identically 0
 
         # and the enabled case really does reconstruct
         x = jnp.asarray(np.random.RandomState(2).rand(2, 32 * 32).astype(np.float32))
@@ -189,13 +208,14 @@ class TestEncoderStages:
 #  Audio transform                                                            #
 # --------------------------------------------------------------------------- #
 
-class TestAudioTransform:
 
+class TestAudioTransform:
     def _chain(self, n_samples=8192, gl=16):
         mel = MelPower(n_samples, n_fft=1024, hop=512, n_mels=64, griffin_lim_iters=gl)
         sh = mel.out_shape
-        return mel, Sequential([mel, PowerCompression(sh),
-                                LateralInhibition(sh), LeakyIntegrator(sh)])
+        return mel, Sequential(
+            [mel, PowerCompression(sh), LateralInhibition(sh), LeakyIntegrator(sh)]
+        )
 
     def test_default_shapes(self):
         mel, t = self._chain()
@@ -252,8 +272,8 @@ class TestAudioTransform:
 #  Sequential                                                                 #
 # --------------------------------------------------------------------------- #
 
-class TestSequential:
 
+class TestSequential:
     def test_shape_mismatch_raises(self):
         with pytest.raises(ValueError):
             Sequential([DoGCenterSurround((28, 28)), DoGCenterSurround((28, 28))])
@@ -270,8 +290,8 @@ class TestSequential:
 #  SensoryInput layers (need a network context)                               #
 # --------------------------------------------------------------------------- #
 
-class TestSensoryInputLayers:
 
+class TestSensoryInputLayers:
     def test_visual_input_attrs(self):
         net = pcn.PCNetwork(seed=0)
         with net:
@@ -294,37 +314,42 @@ class TestSensoryInputLayers:
 
     def test_visual_input_rejects_bad_shape(self):
         net = pcn.PCNetwork(seed=0)
-        with net:
-            with pytest.raises(ValueError):
-                pcn.VisualInput(in_shape=(4, 32, 32))     # only 1 or 3 channels
+        with net, pytest.raises(ValueError):
+            pcn.VisualInput(in_shape=(4, 32, 32))  # only 1 or 3 channels
 
     def test_visual_encoder_rgb_opponent_downsample(self):
         """v2 encoder: RGB opponent input, pooled below raw resolution, fit norm."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            enc = pcn.VisualInput(in_shape=(3, 32, 32), color='opponent',
-                                  downsample=4, complex_cells=True, keep_lowpass=True)
+            enc = pcn.VisualInput(
+                in_shape=(3, 32, 32),
+                color="opponent",
+                downsample=4,
+                complex_cells=True,
+                keep_lowpass=True,
+            )
         # form energy (4*2) + magno luma (1) + chroma (2) = 11 channels @ 8x8
         assert enc.feature_shape == (11, 8, 8)
         assert enc.raw_shape == (3, 32, 32)
         assert enc.dim == 11 * 8 * 8
-        assert enc.dim < 3 * 32 * 32                       # a *reduction*, not expansion
+        assert enc.dim < 3 * 32 * 32  # a *reduction*, not expansion
 
         rng = np.random.RandomState(0)
         rgb = jnp.asarray(rng.randn(5, 3 * 32 * 32).astype(np.float32))
         assert enc.encode(rgb).shape == (5, enc.dim)
         assert enc.decode(enc.encode(rgb)).shape == (5, 3 * 32 * 32)
 
-        enc.fit(rgb)                                       # freeze per-channel gain
+        enc.fit(rgb)  # freeze per-channel gain
         f = np.asarray(enc.encode(rgb)).reshape(5, enc.feature_shape[0], -1)
         assert np.allclose(f.std(axis=(0, 2)), 1.0, atol=1e-3)
 
     def test_visual_encoder_gray(self):
         net = pcn.PCNetwork(seed=0)
         with net:
-            enc = pcn.VisualInput(in_shape=(1, 32, 32), color='gray',
-                                  downsample=2, complex_cells=True)
-        assert enc.feature_shape == (8, 16, 16)           # 4*2 energy channels
+            enc = pcn.VisualInput(
+                in_shape=(1, 32, 32), color="gray", downsample=2, complex_cells=True
+            )
+        assert enc.feature_shape == (8, 16, 16)  # 4*2 energy channels
         img = jnp.zeros((3, 32 * 32))
         assert enc.encode(img).shape == (3, enc.dim)
 
@@ -332,6 +357,7 @@ class TestSensoryInputLayers:
 # --------------------------------------------------------------------------- #
 #  Simulation hook                                                            #
 # --------------------------------------------------------------------------- #
+
 
 def _build_vision_net(hidden=16):
     net = pcn.PCNetwork(seed=0)
@@ -346,23 +372,25 @@ def _build_vision_net(hidden=16):
 
 
 class TestSimulationHook:
-
     def test_clamped_value_equals_encode(self):
         net, vi, out = _build_vision_net()
         sim = pcn.Simulation(net)
         rng = np.random.RandomState(0)
         image = rng.randn(2, 784).astype(np.float32)
-        loader = [{'image': image}]
-        res = sim.test(loader, data_map={vi: 'image'},
-                       iterations_per_sample=2, feedforward_init=True,
-                       record_map={'feat': (vi.value, lambda v: v),
-                                   'raw': ('image', lambda r: r)})
-        got = np.asarray(res['feat'][0])
+        loader = [{"image": image}]
+        res = sim.test(
+            loader,
+            data_map={vi: "image"},
+            iterations_per_sample=2,
+            feedforward_init=True,
+            record_map={"feat": (vi.value, lambda v: v), "raw": ("image", lambda r: r)},
+        )
+        got = np.asarray(res["feat"][0])
         expected = np.asarray(vi.encode(jnp.asarray(image)))
         assert got.shape == (2, vi.dim)
         assert np.allclose(got, expected, atol=1e-3)
         # raw is still probeable via the string key
-        assert np.allclose(np.asarray(res['raw'][0]), image)
+        assert np.allclose(np.asarray(res["raw"][0]), image)
 
     def test_soft_clamp_beta1_equals_full(self):
         """A soft-clamp whose clamp-strength mask is β=1 (per-sample scalar)
@@ -371,28 +399,31 @@ class TestSimulationHook:
         sim = pcn.Simulation(net)
         rng = np.random.RandomState(0)
         image = rng.randn(2, 784).astype(np.float32)
-        mask = np.ones((2,), np.float32)              # per-sample β=1 (clamp space)
-        loader = [{'image': image, 'mask': mask}]
-        res = sim.test(loader, data_map={vi: ('image', 'mask')},
-                       iterations_per_sample=2,
-                       record_map={'feat': (vi.value, lambda v: v)})
+        mask = np.ones((2,), np.float32)  # per-sample β=1 (clamp space)
+        loader = [{"image": image, "mask": mask}]
+        res = sim.test(
+            loader,
+            data_map={vi: ("image", "mask")},
+            iterations_per_sample=2,
+            record_map={"feat": (vi.value, lambda v: v)},
+        )
         expected = np.asarray(vi.encode(jnp.asarray(image)))
-        assert np.allclose(np.asarray(res['feat'][0]), expected, atol=1e-3)
+        assert np.allclose(np.asarray(res["feat"][0]), expected, atol=1e-3)
 
     def test_scalar_clamp_mask(self):
         """A scalar clamp-strength mask broadcasts to the feature clamp shape."""
         net, vi, out = _build_vision_net()
         sim = pcn.Simulation(net)
         image = np.zeros((2, 784), np.float32)
-        loader = [{'image': image, 'mask': np.float32(0.5)}]
+        loader = [{"image": image, "mask": np.float32(0.5)}]
         # runs without error (scalar mask -> broadcast to (B, feat_dim))
-        sim.test(loader, data_map={vi: ('image', 'mask')}, iterations_per_sample=1)
+        sim.test(loader, data_map={vi: ("image", "mask")}, iterations_per_sample=1)
 
     def test_temporal_encode(self):
         """Temporal raw data (B, T, raw_dim) encodes to (B, T, feat_dim)."""
         net, vi, out = _build_vision_net()
         sim = pcn.Simulation(net)
-        raw = np.zeros((2, 3, 784), np.float32)       # (B, T, raw_dim)
+        raw = np.zeros((2, 3, 784), np.float32)  # (B, T, raw_dim)
         feat = sim._encode_sensory(vi, raw)
         assert feat.shape == (2, 3, vi.dim)
 
@@ -402,9 +433,13 @@ class TestSimulationHook:
         rng = np.random.RandomState(1)
         image = rng.randn(4, 784).astype(np.float32)
         label = jax.nn.softmax(jnp.asarray(rng.randn(4, 10).astype(np.float32)), axis=-1)
-        loader = [{'image': image, 'label': np.asarray(label)}]
-        sim.train(loader, data_map={vi: 'image', out: 'label'},
-                  epochs=1, iterations_per_sample=3,
-                  learning_iterations_per_sample=1)
+        loader = [{"image": image, "label": np.asarray(label)}]
+        sim.train(
+            loader,
+            data_map={vi: "image", out: "label"},
+            epochs=1,
+            iterations_per_sample=3,
+            learning_iterations_per_sample=1,
+        )
         e = np.asarray(sim.train_energies[-1])
         assert np.all(np.isfinite(e))

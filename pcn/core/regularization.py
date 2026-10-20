@@ -1,5 +1,4 @@
-"""
-Regularization classes for layer activations.
+"""Regularization classes for layer activations.
 
 Regularizations can be applied to layer activities during inference
 (inference_reg) and/or training (train_reg). Each regularization class
@@ -52,7 +51,9 @@ class SumReg(NamedTuple):
 
     Attributes:
         regs: tuple of regularizer instances. Each must implement ``apply``.
+
     """
+
     regs: tuple = ()
 
     def apply(self, x, key=None, labels=None):
@@ -71,7 +72,9 @@ class L1Norm(NamedTuple):
 
     Attributes:
         strength: Regularization coefficient.
+
     """
+
     strength: float = 1.0
 
     def apply(self, x, key=None, labels=None):
@@ -84,6 +87,7 @@ class L1Norm(NamedTuple):
 
         Returns:
             Scalar energy contribution.
+
         """
         return self.strength * jnp.sum(jnp.mean(jnp.abs(x), axis=0))
 
@@ -96,7 +100,9 @@ class L2Norm(NamedTuple):
 
     Attributes:
         strength: Regularization coefficient.
+
     """
+
     strength: float = 1.0
 
     def apply(self, x, key=None, labels=None):
@@ -109,8 +115,9 @@ class L2Norm(NamedTuple):
 
         Returns:
             Scalar energy contribution.
+
         """
-        return self.strength * jnp.sum(jnp.mean(x ** 2, axis=0))
+        return self.strength * jnp.sum(jnp.mean(x**2, axis=0))
 
 
 class UnitNorm(NamedTuple):
@@ -124,7 +131,9 @@ class UnitNorm(NamedTuple):
         strength: Regularization coefficient.
         eps: Small constant added inside the sqrt for gradient stability
             near zero norm.
+
     """
+
     strength: float = 1.0
     eps: float = 1e-8
 
@@ -138,14 +147,16 @@ class UnitNorm(NamedTuple):
 
         Returns:
             Scalar energy contribution.
+
         """
-        norms = jnp.sqrt(jnp.sum(x ** 2, axis=-1) + self.eps)
+        norms = jnp.sqrt(jnp.sum(x**2, axis=-1) + self.eps)
         return self.strength * jnp.mean((norms - 1.0) ** 2)
 
 
 # ---------------------------------------------------------------------------
 # SIGReg helpers
 # ---------------------------------------------------------------------------
+
 
 def _epps_pulley_statistic(
     samples: jnp.ndarray,
@@ -165,6 +176,7 @@ def _epps_pulley_statistic(
 
     Returns:
         Scalar test statistic (lower = more Gaussian).
+
     """
     x = samples  # [N]
 
@@ -178,13 +190,13 @@ def _epps_pulley_statistic(
     ecf_imag = jnp.mean(jnp.sin(tx), axis=1)  # [T]
 
     # Gaussian CF for N(0,1): phi(t) = exp(-t^2 / 2)
-    gcf = jnp.exp(-0.5 * t ** 2)  # [T]
+    gcf = jnp.exp(-0.5 * t**2)  # [T]
 
     # Squared difference |phi_hat - phi|^2
-    sq_diff = (ecf_real - gcf) ** 2 + ecf_imag ** 2  # [T]
+    sq_diff = (ecf_real - gcf) ** 2 + ecf_imag**2  # [T]
 
     # Weight by Gaussian kernel and integrate (trapezoidal rule)
-    weight = jnp.exp(-0.5 * t ** 2)  # [T]
+    weight = jnp.exp(-0.5 * t**2)  # [T]
     return jnp.trapezoid(sq_diff * weight, dx=dt)
 
 
@@ -206,6 +218,7 @@ def _sigreg_loss(
 
     Returns:
         Scalar SIGReg loss.
+
     """
     N, D = embeddings.shape
 
@@ -240,7 +253,9 @@ class SIGReg(NamedTuple):
         num_points: Quadrature points for the Epps-Pulley test.
         t_max: Integration bound for the Epps-Pulley test.
         seed: Random seed for generating projection directions.
+
     """
+
     strength: float = 1.0
     num_slices: int = 1024
     num_points: int = 17
@@ -258,11 +273,11 @@ class SIGReg(NamedTuple):
 
         Returns:
             Scalar energy contribution.
+
         """
         if key is None:
             key = jax.random.PRNGKey(self.seed)
-        return self.strength * _sigreg_loss(
-            x, key, self.num_slices, self.num_points, self.t_max)
+        return self.strength * _sigreg_loss(x, key, self.num_slices, self.num_points, self.t_max)
 
 
 class SupConLoss(NamedTuple):
@@ -302,7 +317,9 @@ class SupConLoss(NamedTuple):
         strength: Regularization coefficient (added to the energy).
         temperature: Softmax temperature. 0.07-0.5 is the typical SupCon range.
         eps: Numerical stabiliser added under the L2 normalisation sqrt.
+
     """
+
     strength: float = 1.0
     temperature: float = 0.1
     eps: float = 1e-8
@@ -319,6 +336,7 @@ class SupConLoss(NamedTuple):
 
         Returns:
             Scalar SupCon loss × strength.
+
         """
         if labels is None:
             return jnp.array(0.0, dtype=jnp.float32)

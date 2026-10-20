@@ -6,13 +6,16 @@ f(x)_i = max(x_i - theta_i, 0). Thresholds are carried on the LayerSpec
 closure, mirroring Softmax temperature / NWTA num_winners.
 """
 
-import pytest
 import jax
 import jax.numpy as jnp
+import pytest
 
 import pcn
 from pcn.core.activations import (
-    ThresholdRelu, Relu, ACTIVATIONS, activation_from_name,
+    ACTIVATIONS,
+    Relu,
+    ThresholdRelu,
+    activation_from_name,
 )
 
 
@@ -42,11 +45,10 @@ class TestThresholdReluClass:
         assert a != c
 
     def test_registry_and_static_fallback(self):
-        assert isinstance(activation_from_name('threshold_relu'), ThresholdRelu)
+        assert isinstance(activation_from_name("threshold_relu"), ThresholdRelu)
         # Static fn (non-layer slots) is plain ReLU.
         x = jnp.array([-1.0, 2.0])
-        assert jnp.allclose(ACTIVATIONS[ThresholdRelu.type_id](x),
-                            jnp.maximum(x, 0))
+        assert jnp.allclose(ACTIVATIONS[ThresholdRelu.type_id](x), jnp.maximum(x, 0))
 
 
 class TestThresholdReluSpec:
@@ -54,8 +56,7 @@ class TestThresholdReluSpec:
         net = pcn.PCNetwork(seed=0)
         with net:
             l1 = pcn.Layer(dim=4, activation=pcn.Direct(), label="a")
-            l2 = pcn.Layer(dim=3, activation=pcn.ThresholdRelu((0.1, 0.2, 0.3)),
-                           label="b")
+            l2 = pcn.Layer(dim=3, activation=pcn.ThresholdRelu((0.1, 0.2, 0.3)), label="b")
             pcn.Predict(l2, l1)
         net.build()
         assert net.structure.layers[0].activation_thresholds == ()
@@ -65,8 +66,7 @@ class TestThresholdReluSpec:
         net = pcn.PCNetwork(seed=0)
         with net:
             l1 = pcn.Layer(dim=4, activation=pcn.Direct(), label="a")
-            l2 = pcn.Layer(dim=8, activation=pcn.ThresholdRelu((0.1, 0.2, 0.3)),
-                           label="b")
+            l2 = pcn.Layer(dim=8, activation=pcn.ThresholdRelu((0.1, 0.2, 0.3)), label="b")
             pcn.Predict(l2, l1)
         with pytest.raises(ValueError, match="thresholds length"):
             net.build()
@@ -74,8 +74,7 @@ class TestThresholdReluSpec:
 
 def _build_net(activation, W):
     net = pcn.PCNetwork(seed=0)
-    net.config(use_bias=False, learn_precision_weights=False,
-               learn_precision_bias=False)
+    net.config(use_bias=False, learn_precision_weights=False, learn_precision_bias=False)
     with net:
         l1 = pcn.Layer(dim=16, activation=pcn.Direct(), label="post")
         l2 = pcn.Layer(dim=8, activation=activation, label="pre")
@@ -96,20 +95,19 @@ class TestThresholdReluBackend:
 
         from pcn.backend.simulation import run_batch
 
-        net_thr = _build_net(pcn.ThresholdRelu(tuple(float(t) for t in theta)),
-                             jnp.array(W))
+        net_thr = _build_net(pcn.ThresholdRelu(tuple(float(t) for t in theta)), jnp.array(W))
         net_relu = _build_net(pcn.Relu(), jnp.array(W))
 
-        data_map = ((0, 'post'), (1, 'pre'))
-        sample_thr = {'post': x_post, 'pre': x_pre}
-        sample_relu = {'post': x_post, 'pre': x_pre - theta}
+        data_map = ((0, "post"), (1, "pre"))
+        sample_thr = {"post": x_post, "pre": x_pre}
+        sample_relu = {"post": x_post, "pre": x_pre - theta}
 
         _, _, _, _, err_thr, _, _, _ = run_batch(
-            sample_thr, net_thr.params, net_thr.structure,
-            data_map, 5, 1, learning=False)
+            sample_thr, net_thr.params, net_thr.structure, data_map, 5, 1, learning=False
+        )
         _, _, _, _, err_relu, _, _, _ = run_batch(
-            sample_relu, net_relu.params, net_relu.structure,
-            data_map, 5, 1, learning=False)
+            sample_relu, net_relu.params, net_relu.structure, data_map, 5, 1, learning=False
+        )
 
         assert jnp.allclose(err_thr[0], err_relu[0], atol=1e-6)
 
@@ -119,23 +117,28 @@ class TestThresholdReluBackend:
 
         k1, k2 = jax.random.split(rng_key)
         net = pcn.PCNetwork(seed=1)
-        net.config(use_bias=True, learn_precision_weights=False,
-                   learn_precision_bias=False)
+        net.config(use_bias=True, learn_precision_weights=False, learn_precision_bias=False)
         with net:
-            l_in = pcn.Layer(dim=6, activation=pcn.ThresholdRelu(
-                (0.0, 0.1, 0.2, 0.3, 0.4, 0.5)), label="in")
+            l_in = pcn.Layer(
+                dim=6, activation=pcn.ThresholdRelu((0.0, 0.1, 0.2, 0.3, 0.4, 0.5)), label="in"
+            )
             l_out = pcn.Layer(dim=3, activation=pcn.Direct(), label="out")
             pcn.Predict(l_in, l_out)
         net.build()
 
         w_before = jnp.array(net.params.predict_weights[0])
-        batches = [{'in': jax.random.normal(k1, (8, 6)),
-                    'out': jax.random.normal(k2, (8, 3))}]
+        batches = [{"in": jax.random.normal(k1, (8, 6)), "out": jax.random.normal(k2, (8, 3))}]
         sim = pcn.Simulation(net)
-        sim.train(batches, data_map={l_in: 'in', l_out: 'out'}, epochs=2,
-                  iterations_per_sample=0, learning_iterations_per_sample=4,
-                  verbose=False, params_optimizer=optax.adam(1e-2),
-                  values_optimizer=optax.sgd(0.1))
+        sim.train(
+            batches,
+            data_map={l_in: "in", l_out: "out"},
+            epochs=2,
+            iterations_per_sample=0,
+            learning_iterations_per_sample=4,
+            verbose=False,
+            params_optimizer=optax.adam(1e-2),
+            values_optimizer=optax.sgd(0.1),
+        )
         w_after = net.params.predict_weights[0]
         assert w_after.shape == w_before.shape
         assert jnp.all(jnp.isfinite(w_after))

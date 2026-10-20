@@ -1,5 +1,4 @@
-"""
-Configuration system for PCN.
+"""Configuration system for PCN.
 
 Loads defaults from default_config.json and provides utilities for
 merging custom config files and keyword overrides.
@@ -36,6 +35,7 @@ def load_config(config_file=None) -> dict:
     Returns:
         Merged configuration dict with ``"model"``, ``"train"``, and
         ``"test"`` sections.
+
     """
     with open(_DEFAULT_CONFIG_PATH) as f:
         config = json.load(f)
@@ -81,4 +81,5 @@ def validate_keys(section, keys):
     if unknown:
         raise ValueError(
             f"Unknown config key(s) {sorted(unknown)} for section(s) "
-            f"{sections}. Valid keys: {sorted(allowed)}")
+            f"{sections}. Valid keys: {sorted(allowed)}"
+        )

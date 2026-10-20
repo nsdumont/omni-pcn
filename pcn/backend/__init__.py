@@ -1,5 +1,4 @@
-"""
-PCN Backend Module - Optimized JAX functions for simulation and learning.
+"""PCN Backend Module - Optimized JAX functions for simulation and learning.
 
 This module contains the low-level computational functions that implement
 predictive coding dynamics. Functions are JIT-compiled for speed.
@@ -10,20 +9,20 @@ step in a single JIT-compiled function with lax.fori_loop for efficiency.
 For testing and advanced usage, lower-level functions are also available.
 """
 
-from .simulation import (
-    # Main entry points
-    run_batch,
-    # Activation functions
-    ACTIVATIONS,
-)
 from .backprop_simulation import run_backprop_batch
 from .bptt_simulation import run_bptt_batch
+from .simulation import (
+    # Activation functions
+    ACTIVATIONS,
+    # Main entry points
+    run_batch,
+)
 
 __all__ = [
     # Main entry points
-    'run_batch',
-    'run_backprop_batch',
-    'run_bptt_batch',
+    "run_batch",
+    "run_backprop_batch",
+    "run_bptt_batch",
     # Activation functions
-    'ACTIVATIONS',
+    "ACTIVATIONS",
 ]

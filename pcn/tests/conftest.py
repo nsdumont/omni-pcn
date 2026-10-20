@@ -1,10 +1,8 @@
-"""
-Pytest fixtures for PCN tests.
-"""
+"""Pytest fixtures for PCN tests."""
 
-import pytest
 import jax
 import jax.numpy as jnp
+import pytest
 
 
 @pytest.fixture
@@ -20,7 +18,7 @@ def simple_network():
 
     net = pcn.PCNetwork(seed=0)
     with net:
-        l1 = pcn.Layer(dim=16, activation=pcn.Direct(),  label="input")
+        l1 = pcn.Layer(dim=16, activation=pcn.Direct(), label="input")
         l2 = pcn.Layer(dim=8, activation=pcn.Relu(), label="hidden")
         l3 = pcn.Layer(dim=4, activation=pcn.Softmax(), label="output")
 
@@ -49,16 +47,10 @@ def complex_network():
         pcn.Predict(l4, l3)
 
         # Lateral shortcut (Project)
-        pcn.Project(
-            l4.value, l2.value,
-            update_rule=pcn.Hebbian(learning_rate=1e-4)
-        )
+        pcn.Project(l4.value, l2.value, update_rule=pcn.Hebbian(learning_rate=1e-4))
 
         # Modulate connection (uses predict connection's error)
-        pcn.Modulate(
-            l3.value, p2.error,
-            update_rule=pcn.Hebbian(learning_rate=1e-4)
-        )
+        pcn.Modulate(l3.value, p2.error, update_rule=pcn.Hebbian(learning_rate=1e-4))
 
     net.build()
     return net, (l1, l2, l3, l4)
@@ -71,17 +63,23 @@ def simple_dataloader():
     Returns a factory function that creates fresh iterables each time.
     The returned dataloader can be used multiple times (for multiple epochs).
     """
+
     def dataloader_factory(n_batches=5, batch_size=8, input_dim=16, output_dim=4):
         """Returns a list of batches that can be iterated multiple times."""
         key = jax.random.PRNGKey(123)
         batches = []
-        for i in range(n_batches):
+        for _i in range(n_batches):
             key, k1, k2 = jax.random.split(key, 3)
-            batches.append({
-                'input': jax.random.normal(k1, (batch_size, input_dim)),
-                'output': jax.nn.softmax(jax.random.normal(k2, (batch_size, output_dim)), axis=-1)
-            })
+            batches.append(
+                {
+                    "input": jax.random.normal(k1, (batch_size, input_dim)),
+                    "output": jax.nn.softmax(
+                        jax.random.normal(k2, (batch_size, output_dim)), axis=-1
+                    ),
+                }
+            )
         return batches
+
     return dataloader_factory
 
 

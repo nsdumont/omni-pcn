@@ -1,5 +1,4 @@
-"""
-Fixed sensory front-end transforms and the ``SensoryInput`` layer wrapper.
+"""Fixed sensory front-end transforms and the ``SensoryInput`` layer wrapper.
 
 A ``SensoryTransform`` is a **fixed** (frozen, non-learned), approximately
 invertible batched feature map applied to a modality's raw input *once per
@@ -25,16 +24,15 @@ Concrete modality pipelines live in :mod:`pcn.core.sensory.vision` and
 :mod:`pcn.core.sensory.audio`.
 """
 
-from typing import Optional, Sequence, Tuple
+from collections.abc import Sequence
 
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 
-from ..layer import Layer
 from ..activations import Direct
+from ..layer import Layer
 
-
-Shape = Tuple[int, ...]
+Shape = tuple[int, ...]
 
 
 def _prod(shape: Sequence[int]) -> int:
@@ -118,11 +116,11 @@ class Sequential(SensoryTransform):
         stages = list(stages)
         if not stages:
             raise ValueError("Sequential requires at least one stage")
-        for a, b in zip(stages, stages[1:]):
+        for a, b in zip(stages, stages[1:], strict=False):
             if tuple(a.out_shape) != tuple(b.in_shape):
                 raise ValueError(
-                    f"Shape mismatch between {a!r} (out={a.out_shape}) and "
-                    f"{b!r} (in={b.in_shape})")
+                    f"Shape mismatch between {a!r} (out={a.out_shape}) and {b!r} (in={b.in_shape})"
+                )
         self.stages = stages
         self.in_shape = tuple(stages[0].in_shape)
         self.out_shape = tuple(stages[-1].out_shape)
@@ -169,16 +167,17 @@ class SensoryInput(Layer):
     Use :meth:`encode` to apply the transform manually and :meth:`decode` for the
     approximate inverse (e.g. reconstructing pixels/audio from a generated
     feature value during generative probing).
+
     """
 
-    def __init__(self, transform: SensoryTransform, *,
-                 activation=None, label: Optional[str] = None):
+    def __init__(self, transform: SensoryTransform, *, activation=None, label: str | None = None):
         if not isinstance(transform, SensoryTransform):
-            raise TypeError(
-                f"transform must be a SensoryTransform, got {type(transform).__name__}")
-        super().__init__(dim=transform.out_dim,
-                         activation=Direct() if activation is None else activation,
-                         label=label)
+            raise TypeError(f"transform must be a SensoryTransform, got {type(transform).__name__}")
+        super().__init__(
+            dim=transform.out_dim,
+            activation=Direct() if activation is None else activation,
+            label=label,
+        )
         self.transform = transform
         self.feature_shape: Shape = tuple(transform.out_shape)
         self.raw_shape: Shape = tuple(transform.in_shape)
@@ -193,6 +192,8 @@ class SensoryInput(Layer):
 
     def __repr__(self) -> str:
         label = self.label or f"layer_{self._idx}"
-        return (f"{type(self).__name__}(dim={self.dim}, "
-                f"feature_shape={self.feature_shape}, raw_shape={self.raw_shape}, "
-                f"label='{label}')")
+        return (
+            f"{type(self).__name__}(dim={self.dim}, "
+            f"feature_shape={self.feature_shape}, raw_shape={self.raw_shape}, "
+            f"label='{label}')"
+        )

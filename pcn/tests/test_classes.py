@@ -1,10 +1,7 @@
-"""
-Test that PCN classes have correct fields and types.
-"""
+"""Test that PCN classes have correct fields and types."""
 
-import pytest
 import jax.numpy as jnp
-from typing import NamedTuple
+import pytest
 
 
 class TestActivationClasses:
@@ -12,7 +9,7 @@ class TestActivationClasses:
 
     def test_activation_type_ids(self):
         """Test that each activation has correct type_id."""
-        from pcn import Direct, Relu, Softmax, Tanh, Sigmoid
+        from pcn import Direct, Relu, Sigmoid, Softmax, Tanh
 
         assert Direct().type_id == 0
         assert Relu().type_id == 1
@@ -32,14 +29,12 @@ class TestActivationClasses:
 class TestLearningRuleClasses:
     """Test learning rule classes."""
 
-
     def test_hebbian(self):
         """Test Hebbian with custom learning rate."""
         from pcn import Hebbian
 
         rule = Hebbian(learning_rate=0.01)
         assert rule.learning_rate == 0.01
-
 
     def test_oja(self):
         """Test Oja with custom learning rate."""
@@ -48,7 +43,6 @@ class TestLearningRuleClasses:
         rule = Oja(learning_rate=0.01)
         assert rule.learning_rate == 0.01
         assert rule.type_id == 3
-
 
     def test_three_factor_hebbian_with_reward(self):
         """Test ThreeFactorHebbian with reward function (inputs, fn) tuple."""
@@ -59,10 +53,10 @@ class TestLearningRuleClasses:
 
         rule = ThreeFactorHebbian(
             learning_rate=0.005,
-            reward_fn=(('label',), my_reward),
+            reward_fn=(("label",), my_reward),
         )
         assert rule.learning_rate == 0.005
-        assert rule.reward_fn == (('label',), my_reward)
+        assert rule.reward_fn == (("label",), my_reward)
         assert rule.reward_fn_callable is my_reward
 
 
@@ -124,10 +118,9 @@ class TestLayerClass:
             layer = pcn.Layer(dim=32, label="test")
 
         assert isinstance(layer.value, NodeRef)
-        assert layer.value.node_type == 'value'
+        assert layer.value.node_type == "value"
         assert layer.value.node_type_id == 0
-        assert layer.value.owner_type == 'layer'
-
+        assert layer.value.owner_type == "layer"
 
 
 class TestNodeRefClass:
@@ -141,12 +134,12 @@ class TestNodeRefClass:
         net = pcn.PCNetwork()
         with net:
             layer = pcn.Layer(dim=32, label="test")
-            node_ref = NodeRef(layer, 'value', owner_type='layer')
+            node_ref = NodeRef(layer, "value", owner_type="layer")
 
         assert node_ref.layer is layer
         assert node_ref.owner is layer
-        assert node_ref.owner_type == 'layer'
-        assert node_ref.node_type == 'value'
+        assert node_ref.owner_type == "layer"
+        assert node_ref.node_type == "value"
         assert node_ref.node_type_id == 0
 
     def test_node_ref_predict_creation(self):
@@ -163,8 +156,8 @@ class TestNodeRefClass:
         error_ref = conn.error
         assert isinstance(error_ref, NodeRef)
         assert error_ref.owner is conn
-        assert error_ref.owner_type == 'predict'
-        assert error_ref.node_type == 'error'
+        assert error_ref.owner_type == "predict"
+        assert error_ref.node_type == "error"
         assert error_ref.node_type_id == 1
         assert error_ref.predict_conn is conn
 
@@ -204,9 +197,9 @@ class TestNodeRefClass:
         with net:
             layer = pcn.Layer(dim=32)
 
-        assert NodeRef(layer, 'value').node_type_id == 0
-        assert NodeRef(layer, 'error').node_type_id == 1
-        assert NodeRef(layer, 'precision').node_type_id == 2
+        assert NodeRef(layer, "value").node_type_id == 0
+        assert NodeRef(layer, "error").node_type_id == 1
+        assert NodeRef(layer, "precision").node_type_id == 2
 
     def test_node_ref_layer_property_raises_for_predict(self):
         """Test that .layer raises for predict-owned NodeRef."""
@@ -277,9 +270,9 @@ class TestConnectionClasses:
             conn = pcn.Project(l1.value, p1.error)
 
         assert conn.pre.owner is l1
-        assert conn.pre.node_type == 'value'
+        assert conn.pre.node_type == "value"
         assert conn.post.owner is p1
-        assert conn.post.node_type == 'error'
+        assert conn.post.node_type == "error"
         assert conn.pre_node_type == 0
         assert conn.post_node_type == 1
 
@@ -320,23 +313,23 @@ class TestStateClasses:
         from pcn import NetworkState
 
         assert issubclass(NetworkState, tuple)
-        assert hasattr(NetworkState, '_fields')
-        assert 'values' in NetworkState._fields
-        assert 'errors' in NetworkState._fields
-        assert 'precisions' in NetworkState._fields
-        assert 'clamped' in NetworkState._fields
+        assert hasattr(NetworkState, "_fields")
+        assert "values" in NetworkState._fields
+        assert "errors" in NetworkState._fields
+        assert "precisions" in NetworkState._fields
+        assert "clamped" in NetworkState._fields
 
     def test_network_params_is_namedtuple(self):
         """Test NetworkParams is a NamedTuple."""
         from pcn import NetworkParams
 
         assert issubclass(NetworkParams, tuple)
-        assert hasattr(NetworkParams, '_fields')
-        assert 'predict_weights' in NetworkParams._fields
-        assert 'project_weights' in NetworkParams._fields
-        assert 'modulate_weights' in NetworkParams._fields
-        assert 'precision_weights' in NetworkParams._fields
-        assert 'precision_biases' in NetworkParams._fields
+        assert hasattr(NetworkParams, "_fields")
+        assert "predict_weights" in NetworkParams._fields
+        assert "project_weights" in NetworkParams._fields
+        assert "modulate_weights" in NetworkParams._fields
+        assert "precision_weights" in NetworkParams._fields
+        assert "precision_biases" in NetworkParams._fields
 
     def test_network_state_creation(self):
         """Test NetworkState can be created."""
@@ -347,8 +340,7 @@ class TestStateClasses:
         precisions = [jnp.ones((4, 10)), jnp.ones((4, 5))]
         clamped = [jnp.zeros(4, dtype=bool), jnp.zeros(4, dtype=bool)]
 
-        state = NetworkState(
-            values=values, errors=errors, precisions=precisions, clamped=clamped)
+        state = NetworkState(values=values, errors=errors, precisions=precisions, clamped=clamped)
 
         assert len(state.values) == 2
         assert len(state.errors) == 2
@@ -416,7 +408,7 @@ class TestStructureClasses:
             post_node_type=1,
             learning_rule_type=0,
             learning_rate=0.001,
-            reward_fn_idx=-1
+            reward_fn_idx=-1,
         )
         assert spec.pre_idx == (0,)
         assert spec.pre_node_type == 0
@@ -425,7 +417,7 @@ class TestStructureClasses:
 
     def test_network_structure_hashable(self):
         """Test NetworkStructure is hashable."""
-        from pcn.core.structure import NetworkStructure, LayerSpec
+        from pcn.core.structure import LayerSpec, NetworkStructure
 
         structure = NetworkStructure(
             layers=(LayerSpec(10, 0, 0.1, "l1"), LayerSpec(5, 1, 0.1, "l2")),
@@ -433,7 +425,7 @@ class TestStructureClasses:
             project_conns=(),
             modulate_conns=(),
             layer_dims=(10, 5),
-            predict_error_dims=()
+            predict_error_dims=(),
         )
 
         # Should not raise
@@ -491,8 +483,8 @@ class TestPCNetworkClass:
             pcn.Layer(dim=5, label="output")
         net.build()
 
-        assert net['input'] == 0
-        assert net['output'] == 1
+        assert net["input"] == 0
+        assert net["output"] == 1
 
     def test_pcnetwork_layer_outside_context_raises(self):
         """Test creating Layer outside context raises error."""
@@ -500,8 +492,6 @@ class TestPCNetworkClass:
 
         with pytest.raises(RuntimeError, match="No PCNetwork context"):
             pcn.Layer(dim=10)
-
-
 
 
 class TestPredictConnectionLabels:
@@ -697,8 +687,9 @@ class TestMultiTransform:
 
     def test_raises_before_build(self):
         """Test that multi_transform before build() raises RuntimeError."""
-        import pcn
         import optax
+
+        import pcn
 
         net = pcn.PCNetwork()
         with net:
@@ -718,8 +709,8 @@ class TestMultiTransform:
 
     def test_works_in_training(self):
         """Test multi_transform optimizer in an actual training step."""
-        import pcn
         import optax
+
         from pcn import Simulation
 
         net = self._build_net()
@@ -737,8 +728,9 @@ class TestMultiTransform:
         assert result is not None
 
     def test_project_training(self):
-        import pcn
         import optax
+
+        import pcn
         from pcn import Simulation
 
         net = pcn.PCNetwork(seed=0)
@@ -749,17 +741,22 @@ class TestMultiTransform:
             pcn.Predict(l1, l2, label="gen_path")
             pcn.Predict(l2, l3, label="disc_path")
             pcn.Project(
-                l2.value, l3.value,
+                l2.value,
+                l3.value,
                 update_rule=pcn.GradientDescent(
-                    loss_fn=((l3.value, "y"),
-                             lambda out, y: jnp.sum((out - y) ** 2))))
+                    loss_fn=((l3.value, "y"), lambda out, y: jnp.sum((out - y) ** 2))
+                ),
+            )
         net.build()
 
         l_input = net.get_layer("input")
         l_output = net.get_layer("output")
         opt = net.multi_transform(
-            {"predict": optax.adam(1e-3), "precision": optax.sgd(1e-5),
-             "project": optax.adamw(5e-3)},
+            {
+                "predict": optax.adam(1e-3),
+                "precision": optax.sgd(1e-5),
+                "project": optax.adamw(5e-3),
+            },
             default_optim=optax.adam(1e-4),
         )
         sim = Simulation(net)
@@ -798,11 +795,12 @@ class TestRecordMap:
             return float(jnp.mean(values))
 
         results = sim.test(
-            data, data_map=test_map,
-            record_map={'my_metric': ((l_out.value, 'y'), my_metric)},
+            data,
+            data_map=test_map,
+            record_map={"my_metric": ((l_out.value, "y"), my_metric)},
         )
-        assert 'my_metric' in results
-        assert len(results['my_metric']) == 1  # one batch
+        assert "my_metric" in results
+        assert len(results["my_metric"]) == 1  # one batch
 
     def test_duplicate_inputs_different_names(self):
         """Test two functions with the same inputs but different names."""
@@ -815,15 +813,16 @@ class TestRecordMap:
             return float(jnp.sum(values))
 
         results = sim.test(
-            data, data_map=test_map,
+            data,
+            data_map=test_map,
             record_map={
-                'mean_val': ((l_out.value, 'y'), fn_a),
-                'sum_val': ((l_out.value, 'y'), fn_b),
+                "mean_val": ((l_out.value, "y"), fn_a),
+                "sum_val": ((l_out.value, "y"), fn_b),
             },
         )
-        assert 'mean_val' in results
-        assert 'sum_val' in results
-        assert results['mean_val'][0] != results['sum_val'][0]
+        assert "mean_val" in results
+        assert "sum_val" in results
+        assert results["mean_val"][0] != results["sum_val"][0]
 
     def test_single_node_input(self):
         """Test record_map with a single NodeRef input (not a tuple)."""
@@ -833,10 +832,11 @@ class TestRecordMap:
             return float(jnp.mean(values))
 
         results = sim.test(
-            data, data_map=test_map,
-            record_map={'output_mean': (l_out.value, grab)},
+            data,
+            data_map=test_map,
+            record_map={"output_mean": (l_out.value, grab)},
         )
-        assert 'output_mean' in results
+        assert "output_mean" in results
 
     def test_train_record_map(self):
         """Test record_map works in train() and populates train_records."""
@@ -846,11 +846,13 @@ class TestRecordMap:
             return float(jnp.mean(values))
 
         sim.train(
-            data, data_map=data_map, epochs=1,
-            record_map={'train_metric': ((l_out.value, 'y'), my_fn)},
+            data,
+            data_map=data_map,
+            epochs=1,
+            record_map={"train_metric": ((l_out.value, "y"), my_fn)},
         )
-        assert 'train_metric' in sim.train_records
-        assert len(sim.train_records['train_metric']) == 1
+        assert "train_metric" in sim.train_records
+        assert len(sim.train_records["train_metric"]) == 1
 
     def test_non_string_key_raises(self):
         """Test that non-string keys in record_map raise TypeError."""
@@ -858,8 +860,9 @@ class TestRecordMap:
 
         with pytest.raises(TypeError, match="record_map keys must be strings"):
             sim.test(
-                data, data_map=test_map,
-                record_map={(l_out.value, 'y'): ('ignored', lambda x: x)},
+                data,
+                data_map=test_map,
+                record_map={(l_out.value, "y"): ("ignored", lambda x: x)},
             )
 
 
@@ -928,14 +931,14 @@ class TestMultiPre:
         net.build()
 
         sample = {
-            'input1': jnp.ones((2, 10)),
-            'input2': jnp.ones((2, 8)),
+            "input1": jnp.ones((2, 10)),
+            "input2": jnp.ones((2, 8)),
         }
-        data_map = ((l1._idx, 'input1'), (l2._idx, 'input2'))
+        data_map = ((l1._idx, "input1"), (l2._idx, "input2"))
 
         new_params, _, _, vl, el, _, _, energies = run_batch(
-            sample, net.params, net.structure,
-            data_map, n_iterations=5, log_every=5, learning=False)
+            sample, net.params, net.structure, data_map, n_iterations=5, log_every=5, learning=False
+        )
         assert len(vl) == 3
         assert energies.shape[0] > 0
 
@@ -999,7 +1002,7 @@ class TestTransformationParam:
     def test_predict_linear_activation(self):
         """Predict with 'linear-<activation>' wraps the matmul in a nonlinearity."""
         import pcn
-        from pcn.core.activations import Direct, Relu, Softplus, Exp
+        from pcn.core.activations import Direct, Exp, Relu, Softplus
 
         net = pcn.PCNetwork(seed=0)
         with net:
@@ -1007,10 +1010,10 @@ class TestTransformationParam:
             l2 = pcn.Layer(dim=8)
             l3 = pcn.Layer(dim=4)
             l4 = pcn.Layer(dim=4)
-            c_relu = pcn.Predict(l1, l2, transformation='linear-relu')
-            c_softplus = pcn.Predict(l2, l3, transformation='linear-softplus')
-            c_exp = pcn.Predict(l3, l4, transformation='linear-exp')
-            c_plain = pcn.Predict(l1, l2, transformation='linear')
+            c_relu = pcn.Predict(l1, l2, transformation="linear-relu")
+            c_softplus = pcn.Predict(l2, l3, transformation="linear-softplus")
+            c_exp = pcn.Predict(l3, l4, transformation="linear-exp")
+            c_plain = pcn.Predict(l1, l2, transformation="linear")
         net.build()
         assert c_relu.post_activation_type_id == Relu.type_id
         assert c_softplus.post_activation_type_id == Softplus.type_id
@@ -1031,29 +1034,28 @@ class TestTransformationParam:
             l1 = pcn.Layer(dim=10)
             l2 = pcn.Layer(dim=8)
             with pytest.raises(ValueError, match="Invalid transformation"):
-                pcn.Predict(l1, l2, transformation='linear-nope')
+                pcn.Predict(l1, l2, transformation="linear-nope")
 
     def test_predict_linear_activation_apply(self):
         """Spec.apply with 'linear-relu' returns max(0, Wf(x)+b)."""
-        import pcn
         import jax.numpy as jnp
+
+        import pcn
 
         net = pcn.PCNetwork(seed=0)
         with net:
             l1 = pcn.Layer(dim=4)
             l2 = pcn.Layer(dim=3)
-            pcn.Predict(l1, l2, transformation='linear-relu')
+            pcn.Predict(l1, l2, transformation="linear-relu")
         net.build()
         spec = net.structure.predict_conns[0]
         # Force a weight that yields a known sign pattern
-        W = jnp.array([[1., 1., 1., 1.],
-                       [-1., -1., -1., -1.],
-                       [0., 0., 0., 0.]])
-        b = jnp.array([0., 0., 0.])
-        x = jnp.array([[1., 1., 1., 1.]])
+        W = jnp.array([[1.0, 1.0, 1.0, 1.0], [-1.0, -1.0, -1.0, -1.0], [0.0, 0.0, 0.0, 0.0]])
+        b = jnp.array([0.0, 0.0, 0.0])
+        x = jnp.array([[1.0, 1.0, 1.0, 1.0]])
         out = spec.apply(x, W, b)
         # Row 0: sum=4 -> relu -> 4. Row 1: sum=-4 -> relu -> 0. Row 2: 0.
-        assert jnp.allclose(out, jnp.array([[4., 0., 0.]]))
+        assert jnp.allclose(out, jnp.array([[4.0, 0.0, 0.0]]))
 
     def test_predict_banded(self):
         """Predict with banded transformation sets n_bands."""
@@ -1063,7 +1065,7 @@ class TestTransformationParam:
         with net:
             l1 = pcn.Layer(dim=10)
             l2 = pcn.Layer(dim=8)
-            conn = pcn.Predict(l1, l2, transformation='banded5')
+            conn = pcn.Predict(l1, l2, transformation="banded5")
         net.build()
         assert conn.n_bands == 5
         spec = net.structure.predict_conns[0]
@@ -1078,8 +1080,7 @@ class TestTransformationParam:
             # 1 channel, 4x4 spatial => dim=16; 2 channels, 4x4 => dim=32
             l1 = pcn.Layer(dim=16)
             l2 = pcn.Layer(dim=32)
-            conn = pcn.Predict(l1, l2, transformation='conv',
-                               kernel_size=3, input_shape=(4, 4))
+            conn = pcn.Predict(l1, l2, transformation="conv", kernel_size=3, input_shape=(4, 4))
         assert conn.is_conv
 
     def test_predict_conv_wrapper(self):
@@ -1116,7 +1117,7 @@ class TestTransformationParam:
             l1 = pcn.Layer(dim=10)
             l2 = pcn.Layer(dim=8)
             pcn.Predict(l1, l2)
-            conn = pcn.Project(l1.value, l2.value, transformation='banded3')
+            conn = pcn.Project(l1.value, l2.value, transformation="banded3")
         net.build()
         assert conn.n_bands == 3
         spec = net.structure.project_conns[0]
@@ -1131,7 +1132,7 @@ class TestTransformationParam:
             l1 = pcn.Layer(dim=10)
             l2 = pcn.Layer(dim=8)
             with pytest.raises(ValueError, match="Unknown transformation"):
-                pcn.Predict(l1, l2, transformation='invalid')
+                pcn.Predict(l1, l2, transformation="invalid")
 
     def test_predict_masked_requires_weight_mask(self):
         """transformation='masked' without weight_mask raises ValueError."""
@@ -1142,26 +1143,27 @@ class TestTransformationParam:
             l1 = pcn.Layer(dim=10)
             l2 = pcn.Layer(dim=8)
             with pytest.raises(ValueError, match="requires a weight_mask"):
-                pcn.Predict(l1, l2, transformation='masked')
+                pcn.Predict(l1, l2, transformation="masked")
 
     def test_predict_masked_wrong_shape_raises(self):
         """weight_mask with wrong shape raises ValueError."""
-        import pcn
         import numpy as np
+
+        import pcn
 
         net = pcn.PCNetwork(seed=0)
         with net:
             l1 = pcn.Layer(dim=10)
             l2 = pcn.Layer(dim=8)
             with pytest.raises(ValueError, match="weight_mask shape"):
-                pcn.Predict(l1, l2, transformation='masked',
-                            weight_mask=np.ones((8, 9)))
+                pcn.Predict(l1, l2, transformation="masked", weight_mask=np.ones((8, 9)))
 
     def test_predict_masked_init_zeros_weights(self):
         """Predict with masked transformation zeros out W where mask is 0."""
-        import pcn
-        import numpy as np
         import jax.numpy as jnp
+        import numpy as np
+
+        import pcn
 
         # Strict lower-triangular mask: post=4, pre=4
         mask = np.tril(np.ones((4, 4), dtype=np.float32), k=-1)
@@ -1169,8 +1171,7 @@ class TestTransformationParam:
         with net:
             l1 = pcn.Layer(dim=4)
             l2 = pcn.Layer(dim=4)
-            conn = pcn.Predict(l1, l2, transformation='masked',
-                               weight_mask=mask)
+            conn = pcn.Predict(l1, l2, transformation="masked", weight_mask=mask)
         net.build()
         assert conn.is_masked
         spec = net.structure.predict_conns[0]
@@ -1187,23 +1188,31 @@ class TestTransformationParam:
         updated-weights output and deleted the network's copy — every masked
         network raised 'Array has been deleted' on the SECOND train() call.
         """
-        import pcn
         import numpy as np
         import optax
+
+        import pcn
 
         rng = np.random.default_rng(0)
         dims = [11, 8, 19, 13]
         net = pcn.PCNetwork(seed=0)
         with net:
-            ls = [pcn.Layer(dim=d, activation=pcn.Direct() if i == 0 else pcn.LeakyRelu(),
-                            label=f"l{i}") for i, d in enumerate(dims)]
+            ls = [
+                pcn.Layer(
+                    dim=d, activation=pcn.Direct() if i == 0 else pcn.LeakyRelu(), label=f"l{i}"
+                )
+                for i, d in enumerate(dims)
+            ]
             for i in range(len(ls)):
                 for j in range(len(ls)):
                     if i == j:
                         continue
-                    pcn.Predict(ls[i], ls[j], transformation='masked',
-                                weight_mask=(rng.random((dims[j], dims[i])) < 0.5
-                                             ).astype(np.float32))
+                    pcn.Predict(
+                        ls[i],
+                        ls[j],
+                        transformation="masked",
+                        weight_mask=(rng.random((dims[j], dims[i])) < 0.5).astype(np.float32),
+                    )
         net.build()
         l_in = ls[0]
 
@@ -1212,31 +1221,45 @@ class TestTransformationParam:
         # (Whether XLA actually aliases a given mask depends on the graph — it
         # reproduces on a connectome-scale net, not reliably on a toy one — so
         # assert the invariant directly as well as through train().)
-        handed = net.donatable_weight_masks('predict')
+        handed = net.donatable_weight_masks("predict")
         live = [i for i, m in enumerate(net.predict_weight_masks) if m.ndim > 0]
         assert live, "expected masked conns"
         for i in live:
             assert handed[i] is not net.predict_weight_masks[i]
-            np.testing.assert_array_equal(np.asarray(handed[i]),
-                                          np.asarray(net.predict_weight_masks[i]))
-            handed[i].delete()                       # what a donating XLA call does
+            np.testing.assert_array_equal(
+                np.asarray(handed[i]), np.asarray(net.predict_weight_masks[i])
+            )
+            handed[i].delete()  # what a donating XLA call does
         assert not any(net.predict_weight_masks[i].is_deleted() for i in live)
         masks_before = [np.asarray(m) for m in net.predict_weight_masks]
 
         sim = pcn.Simulation(net)
-        loader = [{'x': rng.standard_normal((4, 11)).astype(np.float32)} for _ in range(2)]
-        kw = dict(data_map={l_in: 'x'}, epochs=1, iterations_per_sample=0,
-                  learning_iterations_per_sample=3, feedforward_init=False,
-                  values_optimizer=optax.sgd(0.1),
-                  params_optimizer=optax.adam(1e-3), verbose=False)
+        loader = [{"x": rng.standard_normal((4, 11)).astype(np.float32)} for _ in range(2)]
+        kw = {
+            "data_map": {l_in: "x"},
+            "epochs": 1,
+            "iterations_per_sample": 0,
+            "learning_iterations_per_sample": 3,
+            "feedforward_init": False,
+            "values_optimizer": optax.sgd(0.1),
+            "params_optimizer": optax.adam(1e-3),
+            "verbose": False,
+        }
         sim.train(loader, **kw)
-        sim.train(loader, **kw)          # would raise before the fix
-        sim.test(loader, data_map={l_in: 'x'}, iterations_per_sample=3,
-                 values_optimizer=optax.sgd(0.1), verbose=False)
+        sim.train(loader, **kw)  # would raise before the fix
+        sim.test(
+            loader,
+            data_map={l_in: "x"},
+            iterations_per_sample=3,
+            values_optimizer=optax.sgd(0.1),
+            verbose=False,
+        )
         sim.train(loader, **kw)
 
         # The canonical masks are intact, and the mask is still enforced on W.
-        for i, (before, after) in enumerate(zip(masks_before, net.predict_weight_masks)):
+        for i, (before, after) in enumerate(
+            zip(masks_before, net.predict_weight_masks, strict=False)
+        ):
             assert not after.is_deleted()
             np.testing.assert_array_equal(before, np.asarray(after))
             W = np.asarray(sim.params.predict_weights[i])
@@ -1244,20 +1267,21 @@ class TestTransformationParam:
 
     def test_predict_masked_activation(self):
         """'masked-<activation>' sets BOTH the mask and the post-nonlinearity,
-        and a self-loop lateral Predict trains with the mask enforced."""
-        import pcn
-        import numpy as np
+        and a self-loop lateral Predict trains with the mask enforced.
+        """
         import jax.numpy as jnp
+        import numpy as np
         import optax
 
-        mask = (1.0 - np.eye(6)).astype(np.float32)   # no self-prediction
+        import pcn
+
+        mask = (1.0 - np.eye(6)).astype(np.float32)  # no self-prediction
         net = pcn.PCNetwork(seed=0)
         with net:
             l1 = pcn.Layer(dim=6)
             l2 = pcn.Layer(dim=6, activation=pcn.Softmax())
             pcn.Predict(l1, l2)
-            conn = pcn.Predict(l2, l2, transformation='masked-sigmoid',
-                               weight_mask=mask)
+            conn = pcn.Predict(l2, l2, transformation="masked-sigmoid", weight_mask=mask)
         net.build()
         assert conn.is_masked
         assert conn.post_activation_type_id == pcn.Sigmoid().type_id
@@ -1266,36 +1290,50 @@ class TestTransformationParam:
         assert spec.post_activation_type == pcn.Sigmoid().type_id
         # train one batch; diagonal must stay exactly zero after updates
         sim = pcn.Simulation(net)
-        batch = {"a": np.random.randn(4, 6).astype(np.float32),
-                 "b": np.eye(6, dtype=np.float32)[np.arange(4)]}
-        sim.train([batch], data_map={l1: "a", l2: "b"}, epochs=1,
-                  iterations_per_sample=0, learning_iterations_per_sample=3,
-                  log_every=3, verbose=False,
-                  params_optimizer=optax.adam(1e-2),
-                  values_optimizer=optax.sgd(0.1))
+        batch = {
+            "a": np.random.randn(4, 6).astype(np.float32),
+            "b": np.eye(6, dtype=np.float32)[np.arange(4)],
+        }
+        sim.train(
+            [batch],
+            data_map={l1: "a", l2: "b"},
+            epochs=1,
+            iterations_per_sample=0,
+            learning_iterations_per_sample=3,
+            log_every=3,
+            verbose=False,
+            params_optimizer=optax.adam(1e-2),
+            values_optimizer=optax.sgd(0.1),
+        )
         W = net.params.predict_weights[1]
         assert jnp.allclose(jnp.diag(W), 0.0)
         assert float(jnp.abs(W).max()) > 0.0
 
     def test_predict_masked_bad_activation_raises(self):
         """'masked-<bogus>' raises a helpful ValueError."""
-        import pcn
         import numpy as np
         import pytest
+
+        import pcn
 
         net = pcn.PCNetwork(seed=0)
         with net:
             l1 = pcn.Layer(dim=4)
             l2 = pcn.Layer(dim=4)
             with pytest.raises(ValueError, match="Invalid transformation"):
-                pcn.Predict(l1, l2, transformation='masked-nosuchact',
-                            weight_mask=np.ones((4, 4), dtype=np.float32))
+                pcn.Predict(
+                    l1,
+                    l2,
+                    transformation="masked-nosuchact",
+                    weight_mask=np.ones((4, 4), dtype=np.float32),
+                )
 
     def test_project_masked_init(self):
         """Project respects weight_mask at init."""
-        import pcn
-        import numpy as np
         import jax.numpy as jnp
+        import numpy as np
+
+        import pcn
 
         mask = np.zeros((8, 10), dtype=np.float32)
         mask[:, :3] = 1.0  # only first 3 pre dims connected
@@ -1304,8 +1342,7 @@ class TestTransformationParam:
             l1 = pcn.Layer(dim=10)
             l2 = pcn.Layer(dim=8)
             pcn.Predict(l1, l2)
-            conn = pcn.Project(l1.value, l2.value, transformation='masked',
-                               weight_mask=mask)
+            conn = pcn.Project(l1.value, l2.value, transformation="masked", weight_mask=mask)
         net.build()
         assert conn.is_masked
         W = net.params.project_weights[0]
@@ -1314,37 +1351,47 @@ class TestTransformationParam:
 
     def test_masked_persists_through_training(self):
         """Masked weights stay zero in masked positions after a training step."""
-        import pcn
-        import numpy as np
         import jax.numpy as jnp
-        from pcn.backend.simulation import run_batch
+        import numpy as np
         import optax
+
+        import pcn
+        from pcn.backend.simulation import run_batch
 
         mask = np.tril(np.ones((4, 4), dtype=np.float32), k=-1)
         net = pcn.PCNetwork(seed=0)
         with net:
-            l1 = pcn.Layer(dim=4, label='in')
-            l2 = pcn.Layer(dim=4, label='out')
-            pcn.Predict(l1, l2, transformation='masked', weight_mask=mask)
+            l1 = pcn.Layer(dim=4, label="in")
+            l2 = pcn.Layer(dim=4, label="out")
+            pcn.Predict(l1, l2, transformation="masked", weight_mask=mask)
         net.build()
 
-        sample = {'x': jnp.ones((2, 4)), 'y': jnp.ones((2, 4))}
-        data_map = ((0, 'x'), (1, 'y'))
+        sample = {"x": jnp.ones((2, 4)), "y": jnp.ones((2, 4))}
+        data_map = ((0, "x"), (1, "y"))
         params_opt = optax.sgd(0.1)
-        params_opt_state = params_opt.init({
-            'predict_weights': tuple(net.params.predict_weights),
-            'predict_biases': tuple(net.params.predict_biases),
-            'project_biases': tuple(net.params.project_biases),
-            'modulate_biases': tuple(net.params.modulate_biases),
-            'precision_weights': tuple(net.params.precision_weights),
-            'precision_biases': tuple(net.params.precision_biases),
-            'gd_loss_project_weights': (),
-            'gd_loss_modulate_weights': (),
-        })
+        params_opt_state = params_opt.init(
+            {
+                "predict_weights": tuple(net.params.predict_weights),
+                "predict_biases": tuple(net.params.predict_biases),
+                "project_biases": tuple(net.params.project_biases),
+                "modulate_biases": tuple(net.params.modulate_biases),
+                "precision_weights": tuple(net.params.precision_weights),
+                "precision_biases": tuple(net.params.precision_biases),
+                "gd_loss_project_weights": (),
+                "gd_loss_modulate_weights": (),
+            }
+        )
         new_params, _, _, _, _, _, _, _ = run_batch(
-            sample, net.params, net.structure, data_map, 5, 1,
-            learning=True, n_learning_iterations=0,
-            params_optimizer=params_opt, params_opt_state=params_opt_state,
+            sample,
+            net.params,
+            net.structure,
+            data_map,
+            5,
+            1,
+            learning=True,
+            n_learning_iterations=0,
+            params_optimizer=params_opt,
+            params_opt_state=params_opt_state,
             values_optimizer=optax.sgd(1.0),
             predict_weight_masks=net.predict_weight_masks,
         )
@@ -1377,23 +1424,18 @@ if __name__ == "__main__":
 
     tester = TestLayerClass()
     tester.test_layer_auto_label()
-    tester.test_layer_basic_creation
-    tester.test_layer_custom_activation
+    tester.test_layer_basic_creation()
+    tester.test_layer_custom_activation()
 
     tester = TestMultiTransform()
     tester.test_works_in_training()
     tester.test_project_training()
 
 
-
-
-
-
-
-
 def test_hard_tanh_activation():
     """HardTanh: registered, clips to [-1, 1], usable as a layer activation."""
     import jax.numpy as jnp
+
     import pcn
     from pcn.core.activations import ACTIVATIONS, activation_from_name
 
@@ -1402,7 +1444,7 @@ def test_hard_tanh_activation():
     expected = jnp.array([-1.0, -1.0, 0.3, 1.0, 1.0])
     assert jnp.allclose(act.fn(x), expected)
     assert jnp.allclose(ACTIVATIONS[act.type_id](x), expected)
-    assert isinstance(activation_from_name('hard_tanh'), pcn.HardTanh)
+    assert isinstance(activation_from_name("hard_tanh"), pcn.HardTanh)
 
     net = pcn.PCNetwork(seed=0)
     with net:

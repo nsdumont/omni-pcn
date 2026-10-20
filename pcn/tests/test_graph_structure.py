@@ -1,8 +1,5 @@
-"""
-Test that built network graph matches specification.
-"""
+"""Test that built network graph matches specification."""
 
-import pytest
 import jax.numpy as jnp
 
 
@@ -17,7 +14,7 @@ class TestNetworkBuild:
         with net:
             pcn.Layer(dim=10)
             pcn.Layer(dim=5)
-        result = net.build() # or can do net.build();
+        result = net.build()  # or can do net.build();
 
         assert result is net
         assert net.structure is not None
@@ -60,26 +57,26 @@ class TestLayerStructure:
         """Test label to index mappings."""
         net, _ = simple_network
 
-        assert net.label_to_idx['input'] == 0
-        assert net.label_to_idx['hidden'] == 1
-        assert net.label_to_idx['output'] == 2
+        assert net.label_to_idx["input"] == 0
+        assert net.label_to_idx["hidden"] == 1
+        assert net.label_to_idx["output"] == 2
 
-        assert net.idx_to_label[0] == 'input'
-        assert net.idx_to_label[1] == 'hidden'
-        assert net.idx_to_label[2] == 'output'
+        assert net.idx_to_label[0] == "input"
+        assert net.idx_to_label[1] == "hidden"
+        assert net.idx_to_label[2] == "output"
 
     def test_node_mappings(self, simple_network):
         """Test node to index mappings."""
         net, _ = simple_network
 
         # Layer value nodes
-        assert net.node_to_idx['input-value'] == (0, 'value')
-        assert net.node_to_idx['hidden-value'] == (1, 'value')
-        assert net.node_to_idx['output-value'] == (2, 'value')
+        assert net.node_to_idx["input-value"] == (0, "value")
+        assert net.node_to_idx["hidden-value"] == (1, "value")
+        assert net.node_to_idx["output-value"] == (2, "value")
 
         # Error/precision nodes are on predict connections, not layers
-        assert 'input-error' not in net.node_to_idx
-        assert 'output-precision' not in net.node_to_idx
+        assert "input-error" not in net.node_to_idx
+        assert "output-precision" not in net.node_to_idx
 
 
 class TestPredictConnectionStructure:
@@ -96,13 +93,13 @@ class TestPredictConnectionStructure:
 
         # First connection: hidden -> input
         conn0 = net.structure.predict_conns[0]
-        assert conn0.pre_idx == (1,)   # hidden
+        assert conn0.pre_idx == (1,)  # hidden
         assert conn0.post_idx == 0  # input
         assert conn0.has_fixed_weights is False
 
         # Second connection: output -> hidden
         conn1 = net.structure.predict_conns[1]
-        assert conn1.pre_idx == (2,)   # output
+        assert conn1.pre_idx == (2,)  # output
         assert conn1.post_idx == 1  # hidden
 
     def test_predict_weight_shapes(self, simple_network):
@@ -131,9 +128,9 @@ class TestProjectConnectionStructure:
         net, (l1, l2, l3, l4) = complex_network
 
         conn = net.structure.project_conns[0]
-        assert conn.pre_idx == (3,)      # output
+        assert conn.pre_idx == (3,)  # output
         assert conn.pre_node_type == 0  # value
-        assert conn.post_idx == 1     # hidden1
+        assert conn.post_idx == 1  # hidden1
         assert conn.post_node_type == 0  # value
         assert conn.learning_rule_type == 0  # Hebbian
         assert conn.learning_rate == 1e-4
@@ -160,9 +157,9 @@ class TestModulateConnectionStructure:
         net, _ = complex_network
 
         conn = net.structure.modulate_conns[0]
-        assert conn.pre_idx == (2,)      # hidden2
+        assert conn.pre_idx == (2,)  # hidden2
         assert conn.pre_node_type == 0  # value
-        assert conn.post_idx == 1     # hidden1
+        assert conn.post_idx == 1  # hidden1
         assert conn.post_node_type == 1  # error
         assert conn.learning_rule_type == 0  # Hebbian
 
@@ -176,7 +173,8 @@ class TestModulateConnectionStructure:
 
     def test_modulate_weight_initialization(self, complex_network):
         """Test Modulate weights initialized near 0 (with use_bias=True the bias
-        anchors identity-modulation at 1, so W starts near zero)."""
+        anchors identity-modulation at 1, so W starts near zero).
+        """
         net, _ = complex_network
 
         W = net.params.modulate_weights[0]
@@ -192,19 +190,20 @@ class TestPrecisionInitialization:
     def test_precision_param_count(self, simple_network):
         """Test one precision_weights/bias per predict connection."""
         net, _ = simple_network
-        assert len(net.params.precision_biases) == 2   # 2 predict connections
+        assert len(net.params.precision_biases) == 2  # 2 predict connections
         assert len(net.params.precision_weights) == 2  # 2 predict connections
 
     def test_precision_bias_values(self, simple_network):
         """Precision biases are initialized so that the starting precision
         equals ``init_precision`` (default 1.0) under the chosen
-        parameterization. Default is softplus, so bias = log(e - 1)."""
+        parameterization. Default is softplus, so bias = log(e - 1).
+        """
         import numpy as np
+
         net, _ = simple_network
         expected = float(np.log(np.expm1(1.0)))  # inverse softplus of 1.0
         for pb in net.params.precision_biases:
             assert jnp.allclose(pb, jnp.full_like(pb, expected))
-
 
 
 class TestFixedWeights:
@@ -223,6 +222,28 @@ class TestFixedWeights:
 
         assert net.structure.predict_conns[0].has_fixed_weights is True
         assert net.structure.predict_conns[1].has_fixed_weights is False
+
+
+def test_connection_order_reindexes_nodes_and_attention():
+    """Ordered Predict connections keep NodeRefs aligned with backend slots."""
+    import pcn
+
+    net = pcn.PCNetwork(seed=0)
+    with net:
+        source = pcn.Layer(2, label="source")
+        target = pcn.Layer(2, label="target")
+        late = pcn.Predict(source, target, label="late", order=10)
+        early = pcn.Predict(source, target, label="early", order=0)
+        net.structural_attention([late, early])
+
+    net.build()
+
+    assert [conn.label for conn in net._predict_conns] == ["early", "late"]
+    assert early._idx == 0
+    assert late._idx == 1
+    assert net.node_to_idx["early-error"] == (0, "error")
+    assert net.node_to_idx["late-error"] == (1, "error")
+    assert net.structure.structural_attention_groups[0].conn_indices == (1, 0)
 
 
 class TestWeightInitialization:
@@ -287,7 +308,7 @@ class TestComplexNetworkStructure:
         assert len(net.params.predict_weights) == 3
         assert len(net.params.project_weights) == 1
         assert len(net.params.modulate_weights) == 1
-        assert len(net.params.precision_biases) == 3   # 3 predict connections
+        assert len(net.params.precision_biases) == 3  # 3 predict connections
         assert len(net.params.precision_weights) == 3  # 3 predict connections
 
     def test_complex_layer_dims(self, complex_network):
@@ -298,10 +319,11 @@ class TestComplexNetworkStructure:
     def test_complex_labels(self, complex_network):
         """Test complex network labels."""
         net, _ = complex_network
-        assert net['input'] == 0
-        assert net['hidden1'] == 1
-        assert net['hidden2'] == 2
-        assert net['output'] == 3
+        assert net["input"] == 0
+        assert net["hidden1"] == 1
+        assert net["hidden2"] == 2
+        assert net["output"] == 3
+
 
 if __name__ == "__main__":
     tester = TestNetworkBuild()

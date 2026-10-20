@@ -1,32 +1,30 @@
-"""
-Tests for attention mechanisms:
+"""Tests for attention mechanisms:
 - Mechanism 1: Precision as pre/post for Project/Modulate
 - Mechanism 2: Per-leg flow gating (flow_to_pre, flow_to_post)
-- Mechanism 3: Structural attention (softmax competition)
+- Mechanism 3: Structural attention (softmax competition).
 """
 
-import pytest
-import jax
 import jax.numpy as jnp
-import optax
 import numpy as np
+import pytest
 
 import pcn
 from pcn.backend.simulation import (
-    _apply_project_modulate_precision,
-    _write_additive, _write_multiplicative,
     ACTIVATIONS,
+    _apply_project_modulate_precision,
 )
-from pcn.backend import run_batch
 from pcn.core.structure import (
-    ProjectConnSpec, ModulateConnSpec,
-    StructuralAttentionGroup, _pm_get_pre, _pm_get_post,
+    ModulateConnSpec,
+    ProjectConnSpec,
+    StructuralAttentionGroup,
+    _pm_get_post,
+    _pm_get_pre,
 )
-
 
 # ============================================================================
 # Mechanism 1: Precision as pre/post
 # ============================================================================
+
 
 class TestPrecisionPrePost:
     """Test that precision nodes can be read from and written to."""
@@ -39,9 +37,13 @@ class TestPrecisionPrePost:
         activation_fns = (ACTIVATIONS[0],)  # Direct
 
         result = _pm_get_pre(
-            pre_idx=(0,), pre_node_type=2,
-            values=values, errors=errors,
-            activation_fns=activation_fns, precisions=precisions)
+            pre_idx=(0,),
+            pre_node_type=2,
+            values=values,
+            errors=errors,
+            activation_fns=activation_fns,
+            precisions=precisions,
+        )
         assert jnp.allclose(result, jnp.array([[5.0, 6.0]]))
 
     def test_pm_get_post_precision(self):
@@ -51,8 +53,8 @@ class TestPrecisionPrePost:
         precisions = (jnp.array([[5.0, 6.0]]),)
 
         result = _pm_get_post(
-            post_idx=0, post_node_type=2,
-            values=values, errors=errors, precisions=precisions)
+            post_idx=0, post_node_type=2, values=values, errors=errors, precisions=precisions
+        )
         assert jnp.allclose(result, jnp.array([[5.0, 6.0]]))
 
     def test_apply_project_modulate_precision_additive(self):
@@ -64,16 +66,27 @@ class TestPrecisionPrePost:
         mod_weights = ()
 
         proj_spec = ProjectConnSpec(
-            pre_idx=(0,), pre_node_type=0, post_idx=0, post_node_type=2,
-            learning_rule_type=0, learning_rate=1e-3, reward_fn_idx=-1)
+            pre_idx=(0,),
+            pre_node_type=0,
+            post_idx=0,
+            post_node_type=2,
+            learning_rule_type=0,
+            learning_rate=1e-3,
+            reward_fn_idx=-1,
+        )
         project_conns_precision = ((0, proj_spec),)
         modulate_conns_precision = ()
 
         result = _apply_project_modulate_precision(
-            precisions, values, errors,
-            proj_weights, mod_weights,
-            project_conns_precision, modulate_conns_precision,
-            (ACTIVATIONS[0],))
+            precisions,
+            values,
+            errors,
+            proj_weights,
+            mod_weights,
+            project_conns_precision,
+            modulate_conns_precision,
+            (ACTIVATIONS[0],),
+        )
 
         # Precision[0] should have the additive contribution
         # pre_act = Direct(values[0]) = [[1,1,1], [1,1,1]]
@@ -91,15 +104,26 @@ class TestPrecisionPrePost:
 
         mod_weights = (jnp.eye(3) * 2.0,)
         mod_spec = ModulateConnSpec(
-            pre_idx=(0,), pre_node_type=0, post_idx=0, post_node_type=2,
-            learning_rule_type=0, learning_rate=1e-3, reward_fn_idx=-1)
+            pre_idx=(0,),
+            pre_node_type=0,
+            post_idx=0,
+            post_node_type=2,
+            learning_rule_type=0,
+            learning_rate=1e-3,
+            reward_fn_idx=-1,
+        )
         modulate_conns_precision = ((0, mod_spec),)
 
         result = _apply_project_modulate_precision(
-            precisions, values, errors,
-            (), mod_weights,
-            (), modulate_conns_precision,
-            (ACTIVATIONS[0],))
+            precisions,
+            values,
+            errors,
+            (),
+            mod_weights,
+            (),
+            modulate_conns_precision,
+            (ACTIVATIONS[0],),
+        )
 
         # pre_act = Direct([0.5,0.5,0.5]) = [0.5,0.5,0.5]
         # modulation = 2.0*I @ [0.5,0.5,0.5] = [1.0, 1.0, 1.0]
@@ -110,20 +134,18 @@ class TestPrecisionPrePost:
         """Build a network with precision-targeting Project/Modulate."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_in = pcn.Layer(dim=4, label='input')
-            l_hid = pcn.Layer(dim=3, activation=pcn.Relu(), label='hidden')
-            l_out = pcn.Layer(dim=2, activation=pcn.Relu(), label='output')
+            l_in = pcn.Layer(dim=4, label="input")
+            l_hid = pcn.Layer(dim=3, activation=pcn.Relu(), label="hidden")
+            l_out = pcn.Layer(dim=2, activation=pcn.Relu(), label="output")
 
             p1 = pcn.Predict(l_hid, l_in)
             p2 = pcn.Predict(l_out, l_hid)
 
             # Modulate p1's precision from l_out
-            pcn.Modulate(l_out.value, p1.precision,
-                         update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Modulate(l_out.value, p1.precision, update_rule=pcn.Hebbian(learning_rate=1e-3))
 
             # Project p2's precision to l_in value
-            pcn.Project(p2.precision, l_in.value,
-                        update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Project(p2.precision, l_in.value, update_rule=pcn.Hebbian(learning_rate=1e-3))
         net.build()
 
         s = net.structure
@@ -137,19 +159,18 @@ class TestPrecisionPrePost:
         """Full pipeline with precision-targeting connections runs without error."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_in = pcn.Layer(dim=4, label='input')
-            l_hid = pcn.Layer(dim=3, activation=pcn.Relu(), label='hidden')
-            l_out = pcn.Layer(dim=2, activation=pcn.Relu(), label='output')
+            l_in = pcn.Layer(dim=4, label="input")
+            l_hid = pcn.Layer(dim=3, activation=pcn.Relu(), label="hidden")
+            l_out = pcn.Layer(dim=2, activation=pcn.Relu(), label="output")
 
             p1 = pcn.Predict(l_hid, l_in)
             pcn.Predict(l_out, l_hid)
 
-            pcn.Modulate(l_out.value, p1.precision,
-                         update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Modulate(l_out.value, p1.precision, update_rule=pcn.Hebbian(learning_rate=1e-3))
         net.build()
 
-        dataloader = [{'input': jnp.ones((2, 4))}]
-        data_map = {l_in: 'input'}
+        dataloader = [{"input": jnp.ones((2, 4))}]
+        data_map = {l_in: "input"}
         sim = pcn.Simulation(net)
         sim.config(iterations_per_sample=5)
         result = sim.test(dataloader, data_map)
@@ -159,14 +180,13 @@ class TestPrecisionPrePost:
         """p2.precision modulates p1.error (cross-connection)."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_in = pcn.Layer(dim=4, label='input')
-            l_hid = pcn.Layer(dim=3, activation=pcn.Relu(), label='hidden')
+            l_in = pcn.Layer(dim=4, label="input")
+            l_hid = pcn.Layer(dim=3, activation=pcn.Relu(), label="hidden")
 
             p1 = pcn.Predict(l_hid, l_in)
 
             # Use precision as pre source
-            pcn.Modulate(p1.precision, p1.error,
-                         update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Modulate(p1.precision, p1.error, update_rule=pcn.Hebbian(learning_rate=1e-3))
         net.build()
 
         s = net.structure
@@ -180,6 +200,7 @@ class TestPrecisionPrePost:
 # Mechanism 2: Per-leg flow gating
 # ============================================================================
 
+
 class TestPerLegFlowGating:
     """Test flow_to_pre and flow_to_post sub-nodes on Predict."""
 
@@ -187,13 +208,13 @@ class TestPerLegFlowGating:
         """Predict connection exposes flow_to_pre and flow_to_post."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_a = pcn.Layer(dim=4, label='a')
-            l_b = pcn.Layer(dim=3, label='b')
+            l_a = pcn.Layer(dim=4, label="a")
+            l_b = pcn.Layer(dim=3, label="b")
             p = pcn.Predict(l_a, l_b)
 
-        assert p.flow_to_pre.node_type == 'flow_to_pre'
+        assert p.flow_to_pre.node_type == "flow_to_pre"
         assert p.flow_to_pre.node_type_id == 3
-        assert p.flow_to_post.node_type == 'flow_to_post'
+        assert p.flow_to_post.node_type == "flow_to_post"
         assert p.flow_to_post.node_type_id == 4
         assert p.flow_to_pre.dim == l_b.dim  # same dim as error
         assert p.flow_to_post.dim == l_b.dim
@@ -202,9 +223,9 @@ class TestPerLegFlowGating:
         """Flow nodes can only be targeted by Modulate, not Project."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_a = pcn.Layer(dim=4, label='a')
-            l_b = pcn.Layer(dim=3, label='b')
-            l_gate = pcn.Layer(dim=3, label='gate')
+            l_a = pcn.Layer(dim=4, label="a")
+            l_b = pcn.Layer(dim=3, label="b")
+            l_gate = pcn.Layer(dim=3, label="gate")
             p = pcn.Predict(l_a, l_b)
 
             with pytest.raises(ValueError, match="Modulate"):
@@ -214,9 +235,9 @@ class TestPerLegFlowGating:
         """Flow nodes cannot be used as pre source."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_a = pcn.Layer(dim=4, label='a')
-            l_b = pcn.Layer(dim=3, label='b')
-            l_target = pcn.Layer(dim=3, label='target')
+            l_a = pcn.Layer(dim=4, label="a")
+            l_b = pcn.Layer(dim=3, label="b")
+            l_target = pcn.Layer(dim=3, label="target")
             p = pcn.Predict(l_a, l_b)
 
             with pytest.raises(ValueError, match="Flow nodes"):
@@ -226,16 +247,14 @@ class TestPerLegFlowGating:
         """Network with flow gate Modulate connections builds correctly."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_low = pcn.Layer(dim=4, label='low')
-            l_high = pcn.Layer(dim=3, activation=pcn.Relu(), label='high')
-            l_gate = pcn.Layer(dim=4, activation=pcn.Sigmoid(), label='gate')
+            l_low = pcn.Layer(dim=4, label="low")
+            l_high = pcn.Layer(dim=3, activation=pcn.Relu(), label="high")
+            l_gate = pcn.Layer(dim=4, activation=pcn.Sigmoid(), label="gate")
 
             p = pcn.Predict(l_high, l_low)
 
-            pcn.Modulate(l_gate.value, p.flow_to_pre,
-                         update_rule=pcn.Hebbian(learning_rate=1e-3))
-            pcn.Modulate(l_gate.value, p.flow_to_post,
-                         update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Modulate(l_gate.value, p.flow_to_pre, update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Modulate(l_gate.value, p.flow_to_post, update_rule=pcn.Hebbian(learning_rate=1e-3))
         net.build()
 
         s = net.structure
@@ -247,8 +266,8 @@ class TestPerLegFlowGating:
         """Predict connections without flow gate modulation have False flags."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_a = pcn.Layer(dim=4, label='a')
-            l_b = pcn.Layer(dim=3, label='b')
+            l_a = pcn.Layer(dim=4, label="a")
+            l_b = pcn.Layer(dim=3, label="b")
             pcn.Predict(l_a, l_b)
         net.build()
 
@@ -258,19 +277,18 @@ class TestPerLegFlowGating:
         """Full pipeline with per-leg flow gating runs without error."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_in = pcn.Layer(dim=4, label='input')
-            l_hid = pcn.Layer(dim=3, activation=pcn.Relu(), label='hidden')
-            l_gate = pcn.Layer(dim=3, activation=pcn.Sigmoid(), label='gate')
+            l_in = pcn.Layer(dim=4, label="input")
+            l_hid = pcn.Layer(dim=3, activation=pcn.Relu(), label="hidden")
+            l_gate = pcn.Layer(dim=3, activation=pcn.Sigmoid(), label="gate")
 
             p = pcn.Predict(l_hid, l_in)
             pcn.Predict(l_gate, l_hid)
 
-            pcn.Modulate(l_gate.value, p.flow_to_pre,
-                         update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Modulate(l_gate.value, p.flow_to_pre, update_rule=pcn.Hebbian(learning_rate=1e-3))
         net.build()
 
-        dataloader = [{'input': jnp.ones((2, 4))}]
-        data_map = {l_in: 'input'}
+        dataloader = [{"input": jnp.ones((2, 4))}]
+        data_map = {l_in: "input"}
         sim = pcn.Simulation(net)
         sim.config(iterations_per_sample=5)
         result = sim.test(dataloader, data_map)
@@ -280,26 +298,25 @@ class TestPerLegFlowGating:
         """Setting flow_to_pre gate to 0 should zero the ascending gradient."""
         net = pcn.PCNetwork(seed=42)
         with net:
-            l_in = pcn.Layer(dim=2, label='input', activation=pcn.Direct())
-            l_hid = pcn.Layer(dim=2, activation=pcn.Direct(), label='hidden')
-            l_gate = pcn.Layer(dim=2, activation=pcn.Direct(), label='gate')
+            l_in = pcn.Layer(dim=2, label="input", activation=pcn.Direct())
+            l_hid = pcn.Layer(dim=2, activation=pcn.Direct(), label="hidden")
+            l_gate = pcn.Layer(dim=2, activation=pcn.Direct(), label="gate")
 
             p = pcn.Predict(l_hid, l_in)
 
             # Gate with init_weight=0 should produce zero gate
-            m = pcn.Modulate(l_gate.value, p.flow_to_pre,
-                             update_rule=pcn.NoLearning())
+            m = pcn.Modulate(l_gate.value, p.flow_to_pre, update_rule=pcn.NoLearning())
             m.weight = np.zeros((2, 2))  # zero weight -> zero gate output
         net.build()
 
         # Force gate layer values to zeros (gate output = W @ f(0) = 0)
         # With zero modulate weights, gate_pre = 0, so ascending gradient should be 0
         # The hidden layer values should not change from energy gradient
-        dataloader = [{'input': jnp.array([[1.0, 2.0]])}]
-        data_map = {l_in: 'input'}
+        dataloader = [{"input": jnp.array([[1.0, 2.0]])}]
+        data_map = {l_in: "input"}
         sim = pcn.Simulation(net)
         sim.config(iterations_per_sample=3)
-        result = sim.test(dataloader, data_map)
+        sim.test(dataloader, data_map)
         # Test runs without error — detailed gradient testing would require
         # manual jax.grad checks
 
@@ -307,6 +324,7 @@ class TestPerLegFlowGating:
 # ============================================================================
 # Mechanism 3: Structural Attention
 # ============================================================================
+
 
 class TestStructuralAttention:
     """Test softmax competition among co-targeting Predict connections."""
@@ -321,9 +339,9 @@ class TestStructuralAttention:
         """PCNetwork.structural_attention registers groups correctly."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_target = pcn.Layer(dim=4, label='target')
-            l_a = pcn.Layer(dim=3, label='a')
-            l_b = pcn.Layer(dim=3, label='b')
+            l_target = pcn.Layer(dim=4, label="target")
+            l_a = pcn.Layer(dim=3, label="a")
+            l_b = pcn.Layer(dim=3, label="b")
 
             p_a = pcn.Predict(l_a, l_target)
             p_b = pcn.Predict(l_b, l_target)
@@ -341,10 +359,10 @@ class TestStructuralAttention:
         """Full pipeline with structural attention runs without error."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_target = pcn.Layer(dim=4, label='target')
-            l_a = pcn.Layer(dim=3, activation=pcn.Relu(), label='a')
-            l_b = pcn.Layer(dim=3, activation=pcn.Relu(), label='b')
-            l_c = pcn.Layer(dim=2, activation=pcn.Relu(), label='c')
+            l_target = pcn.Layer(dim=4, label="target")
+            l_a = pcn.Layer(dim=3, activation=pcn.Relu(), label="a")
+            l_b = pcn.Layer(dim=3, activation=pcn.Relu(), label="b")
+            l_c = pcn.Layer(dim=2, activation=pcn.Relu(), label="c")
 
             p_a = pcn.Predict(l_a, l_target)
             p_b = pcn.Predict(l_b, l_target)
@@ -353,8 +371,8 @@ class TestStructuralAttention:
         net.structural_attention([p_a, p_b, p_c], temperature=1.0)
         net.build()
 
-        dataloader = [{'target': jnp.ones((2, 4))}]
-        data_map = {l_target: 'target'}
+        dataloader = [{"target": jnp.ones((2, 4))}]
+        data_map = {l_target: "target"}
         sim = pcn.Simulation(net)
         sim.config(iterations_per_sample=5)
         result = sim.test(dataloader, data_map)
@@ -364,9 +382,9 @@ class TestStructuralAttention:
         """Structural attention works during training."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_target = pcn.Layer(dim=4, label='target')
-            l_a = pcn.Layer(dim=3, activation=pcn.Relu(), label='a')
-            l_b = pcn.Layer(dim=3, activation=pcn.Relu(), label='b')
+            l_target = pcn.Layer(dim=4, label="target")
+            l_a = pcn.Layer(dim=3, activation=pcn.Relu(), label="a")
+            l_b = pcn.Layer(dim=3, activation=pcn.Relu(), label="b")
 
             p_a = pcn.Predict(l_a, l_target)
             p_b = pcn.Predict(l_b, l_target)
@@ -374,8 +392,8 @@ class TestStructuralAttention:
         net.structural_attention([p_a, p_b])
         net.build()
 
-        dataloader = [{'target': jnp.ones((2, 4))}]
-        data_map = {l_target: 'target'}
+        dataloader = [{"target": jnp.ones((2, 4))}]
+        data_map = {l_target: "target"}
         sim = pcn.Simulation(net)
         sim.config(iterations_per_sample=5)
         result = sim.train(dataloader, data_map)
@@ -386,6 +404,7 @@ class TestStructuralAttention:
 # Composability tests
 # ============================================================================
 
+
 class TestComposability:
     """Test that all mechanisms compose correctly."""
 
@@ -393,28 +412,26 @@ class TestComposability:
         """Network using all three mechanisms runs without error."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_target = pcn.Layer(dim=4, label='target')
-            l_a = pcn.Layer(dim=3, activation=pcn.Relu(), label='a')
-            l_b = pcn.Layer(dim=3, activation=pcn.Relu(), label='b')
-            l_gate = pcn.Layer(dim=4, activation=pcn.Sigmoid(), label='gate')
+            l_target = pcn.Layer(dim=4, label="target")
+            l_a = pcn.Layer(dim=3, activation=pcn.Relu(), label="a")
+            l_b = pcn.Layer(dim=3, activation=pcn.Relu(), label="b")
+            l_gate = pcn.Layer(dim=4, activation=pcn.Sigmoid(), label="gate")
 
             p_a = pcn.Predict(l_a, l_target)
             p_b = pcn.Predict(l_b, l_target)
 
             # Mechanism 1: cross-connection precision modulation
-            pcn.Modulate(p_b.precision, p_a.error,
-                         update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Modulate(p_b.precision, p_a.error, update_rule=pcn.Hebbian(learning_rate=1e-3))
 
             # Mechanism 2: per-leg flow gating
-            pcn.Modulate(l_gate.value, p_a.flow_to_pre,
-                         update_rule=pcn.Hebbian(learning_rate=1e-3))
+            pcn.Modulate(l_gate.value, p_a.flow_to_pre, update_rule=pcn.Hebbian(learning_rate=1e-3))
 
         # Mechanism 3: structural attention
         net.structural_attention([p_a, p_b], temperature=1.0)
         net.build()
 
-        dataloader = [{'target': jnp.ones((2, 4))}]
-        data_map = {l_target: 'target'}
+        dataloader = [{"target": jnp.ones((2, 4))}]
+        data_map = {l_target: "target"}
         sim = pcn.Simulation(net)
         sim.config(iterations_per_sample=5)
 
@@ -431,6 +448,7 @@ class TestComposability:
 # Validation tests
 # ============================================================================
 
+
 class TestValidation:
     """Test error handling and validation."""
 
@@ -438,8 +456,8 @@ class TestValidation:
         """Verify flow node type IDs are correct."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_a = pcn.Layer(dim=4, label='a')
-            l_b = pcn.Layer(dim=3, label='b')
+            l_a = pcn.Layer(dim=4, label="a")
+            l_b = pcn.Layer(dim=3, label="b")
             p = pcn.Predict(l_a, l_b)
 
         assert p.error.node_type_id == 1
@@ -451,11 +469,12 @@ class TestValidation:
         """Precision node can be used as pre source (node_type_id=2)."""
         net = pcn.PCNetwork(seed=0)
         with net:
-            l_in = pcn.Layer(dim=4, label='input')
-            l_out = pcn.Layer(dim=3, label='output')
+            l_in = pcn.Layer(dim=4, label="input")
+            l_out = pcn.Layer(dim=3, label="output")
             p = pcn.Predict(l_out, l_in)
 
             # Precision as pre → should set pre_node_type = 2
-            proj = pcn.Project(p.precision, l_out.value,
-                               update_rule=pcn.Hebbian(learning_rate=1e-3))
+            proj = pcn.Project(
+                p.precision, l_out.value, update_rule=pcn.Hebbian(learning_rate=1e-3)
+            )
         assert proj.pre_node_type == 2

@@ -37,6 +37,7 @@ import optax
 
 class NatGradPrecisionState(NamedTuple):
     """Empty state — the natural gradient preconditioner is stateless."""
+
     pass
 
 
@@ -64,7 +65,9 @@ def natural_gradient_precision(damping: float = 1e-4) -> optax.GradientTransform
 
         When d_pre > 63 (jax-mps MLX eigh limit), a diagonal Fisher
         approximation is used automatically (trace-time static branch).
+
     """
+
     def init_fn(params: Any) -> NatGradPrecisionState:
         return NatGradPrecisionState()
 
@@ -80,7 +83,7 @@ def natural_gradient_precision(damping: float = 1e-4) -> optax.GradientTransform
 
         def _precondition_weight(grad_A, f):
             # grad_A: (n_out, d_pre), f: (batch, d_pre)
-            C_f = jnp.einsum('bi,bj->ij', f, f) / f.shape[0]
+            C_f = jnp.einsum("bi,bj->ij", f, f) / f.shape[0]
             C_f_reg = C_f + damping * jnp.eye(C_f.shape[-1])
             d_pre = C_f_reg.shape[-1]
             if d_pre <= 63:
@@ -96,13 +99,13 @@ def natural_gradient_precision(damping: float = 1e-4) -> optax.GradientTransform
 
         nat_pw = tuple(
             _precondition_weight(g_A, f)
-            for g_A, f in zip(updates['precision_weights'], features)
+            for g_A, f in zip(updates["precision_weights"], features, strict=False)
         )
-        nat_pb = tuple(2.0 * g_b for g_b in updates['precision_biases'])
+        nat_pb = tuple(2.0 * g_b for g_b in updates["precision_biases"])
 
         new_updates = dict(updates)
-        new_updates['precision_weights'] = nat_pw
-        new_updates['precision_biases'] = nat_pb
+        new_updates["precision_weights"] = nat_pw
+        new_updates["precision_biases"] = nat_pb
         return new_updates, state
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)

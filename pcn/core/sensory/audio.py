@@ -1,5 +1,4 @@
-"""
-Fixed auditory front-end (cochlea → cortex): ``AuditoryInput``.
+"""Fixed auditory front-end (cochlea → cortex): ``AuditoryInput``.
 
 Per the design decision, the wrapper consumes a **raw fixed-length waveform**
 (``in_shape = (n_samples,)``); the STFT→mel-power computation lives inside the
@@ -21,26 +20,25 @@ frequency (approximate through the ReLU); mel power inverts via the mel
 pseudo-inverse followed by Griffin–Lim to a waveform.
 """
 
-from typing import Optional, Sequence, Tuple
+from collections.abc import Sequence
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-from .base import SensoryTransform, Sequential, SensoryInput
 from . import _filters
-
+from .base import SensoryInput, SensoryTransform, Sequential
 
 # --------------------------------------------------------------------------- #
 #  STFT / mel helpers                                                         #
 # --------------------------------------------------------------------------- #
 
+
 def _hann(n: int) -> np.ndarray:
     return np.hanning(n + 1)[:-1].astype(np.float64) if n > 1 else np.ones(1)
 
 
-def _mel_filterbank(sr: int, n_fft: int, n_mels: int,
-                    fmin: float, fmax: float) -> np.ndarray:
+def _mel_filterbank(sr: int, n_fft: int, n_mels: int, fmin: float, fmax: float) -> np.ndarray:
     """Standard HTK triangular mel filterbank, shape ``(n_mels, n_fft//2+1)``."""
     n_freq = n_fft // 2 + 1
 
@@ -75,14 +73,13 @@ def _stft(x: jnp.ndarray, n_fft: int, hop: int, window: jnp.ndarray) -> jnp.ndar
     n_samples = x.shape[-1]
     n_frames = _frame_indices(n_samples, n_fft, hop)
     idx = jnp.arange(n_fft)[None, :] + hop * jnp.arange(n_frames)[:, None]  # (F, n_fft)
-    frames = x[:, idx] * window                                            # (B, F, n_fft)
-    return jnp.fft.rfft(frames, n=n_fft, axis=-1)                          # (B, F, n_freq)
+    frames = x[:, idx] * window  # (B, F, n_fft)
+    return jnp.fft.rfft(frames, n=n_fft, axis=-1)  # (B, F, n_freq)
 
 
-def _istft(S: jnp.ndarray, n_fft: int, hop: int, window: jnp.ndarray,
-           length: int) -> jnp.ndarray:
+def _istft(S: jnp.ndarray, n_fft: int, hop: int, window: jnp.ndarray, length: int) -> jnp.ndarray:
     """Inverse STFT (overlap-add). ``S``: ``(B, n_frames, n_freq)`` -> ``(B, length)``."""
-    frames = jnp.fft.irfft(S, n=n_fft, axis=-1) * window        # (B, F, n_fft)
+    frames = jnp.fft.irfft(S, n=n_fft, axis=-1) * window  # (B, F, n_fft)
     b, n_frames, _ = frames.shape
     out_len = (n_frames - 1) * hop + n_fft
     out = jnp.zeros((b, out_len))
@@ -90,16 +87,17 @@ def _istft(S: jnp.ndarray, n_fft: int, hop: int, window: jnp.ndarray,
     win_sq = window * window
     for f in range(n_frames):
         start = f * hop
-        out = out.at[:, start:start + n_fft].add(frames[:, f])
-        wsum = wsum.at[start:start + n_fft].add(win_sq)
+        out = out.at[:, start : start + n_fft].add(frames[:, f])
+        wsum = wsum.at[start : start + n_fft].add(win_sq)
     out = out / jnp.maximum(wsum, 1e-8)[None]
     if length <= out_len:
         return out[:, :length]
     return jnp.pad(out, ((0, 0), (0, length - out_len)))
 
 
-def _griffin_lim(mag: jnp.ndarray, n_fft: int, hop: int, window: jnp.ndarray,
-                 length: int, n_iters: int) -> jnp.ndarray:
+def _griffin_lim(
+    mag: jnp.ndarray, n_fft: int, hop: int, window: jnp.ndarray, length: int, n_iters: int
+) -> jnp.ndarray:
     """Reconstruct a waveform from a magnitude spectrogram (zero-phase init).
 
     ``mag``: ``(B, n_frames, n_freq)`` -> ``(B, length)``.
@@ -117,6 +115,7 @@ def _griffin_lim(mag: jnp.ndarray, n_fft: int, hop: int, window: jnp.ndarray,
 #  Stages                                                                     #
 # --------------------------------------------------------------------------- #
 
+
 class MelPower(SensoryTransform):
     """Raw waveform -> linear mel-power spectrogram (STFT → |·|² → mel).
 
@@ -124,9 +123,17 @@ class MelPower(SensoryTransform):
     linear power spectrogram, then Griffin–Lim to a waveform.
     """
 
-    def __init__(self, n_samples: int, sr: int = 16000, n_fft: int = 1024,
-                 hop: int = 512, n_mels: int = 64, fmin: float = 0.0,
-                 fmax: Optional[float] = None, griffin_lim_iters: int = 24):
+    def __init__(
+        self,
+        n_samples: int,
+        sr: int = 16000,
+        n_fft: int = 1024,
+        hop: int = 512,
+        n_mels: int = 64,
+        fmin: float = 0.0,
+        fmax: float | None = None,
+        griffin_lim_iters: int = 24,
+    ):
         fmax = float(fmax) if fmax is not None else sr / 2.0
         self.n_samples = int(n_samples)
         self.sr, self.n_fft, self.hop, self.n_mels = sr, n_fft, hop, n_mels
@@ -136,24 +143,23 @@ class MelPower(SensoryTransform):
         self.out_shape = (n_mels, self.n_frames)
 
         window = _hann(n_fft)
-        mel_fb = _mel_filterbank(sr, n_fft, n_mels, fmin, fmax)          # (n_mels, n_freq)
-        mel_pinv = np.linalg.pinv(mel_fb)                                # (n_freq, n_mels)
+        mel_fb = _mel_filterbank(sr, n_fft, n_mels, fmin, fmax)  # (n_mels, n_freq)
+        mel_pinv = np.linalg.pinv(mel_fb)  # (n_freq, n_mels)
         self._window = jnp.asarray(window)
         self._mel_fb = jnp.asarray(mel_fb)
         self._mel_pinv = jnp.asarray(mel_pinv)
 
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
-        S = _stft(x, self.n_fft, self.hop, self._window)                # (B, F, n_freq)
-        power = jnp.abs(S) ** 2                                          # (B, F, n_freq)
-        mel = jnp.einsum('mk,bfk->bmf', self._mel_fb, power)            # (B, n_mels, F)
+        S = _stft(x, self.n_fft, self.hop, self._window)  # (B, F, n_freq)
+        power = jnp.abs(S) ** 2  # (B, F, n_freq)
+        mel = jnp.einsum("mk,bfk->bmf", self._mel_fb, power)  # (B, n_mels, F)
         return mel
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
         # y: (B, n_mels, n_frames) mel power -> linear power -> magnitude -> wav
-        power = jnp.einsum('km,bmf->bfk', self._mel_pinv, y)            # (B, F, n_freq)
+        power = jnp.einsum("km,bmf->bfk", self._mel_pinv, y)  # (B, F, n_freq)
         mag = jnp.sqrt(jnp.maximum(power, 0.0))
-        return _griffin_lim(mag, self.n_fft, self.hop, self._window,
-                            self.n_samples, self.gl_iters)
+        return _griffin_lim(mag, self.n_fft, self.hop, self._window, self.n_samples, self.gl_iters)
 
 
 class PowerCompression(SensoryTransform):
@@ -162,8 +168,7 @@ class PowerCompression(SensoryTransform):
     Shape-preserving; ``inverse`` is ``x = y^{1/α} − ε`` (clipped at 0).
     """
 
-    def __init__(self, shape: Tuple[int, ...], alpha: float = 1.0 / 3.0,
-                 eps: float = 1e-6):
+    def __init__(self, shape: tuple[int, ...], alpha: float = 1.0 / 3.0, eps: float = 1e-6):
         self.in_shape = tuple(shape)
         self.out_shape = tuple(shape)
         self.alpha = float(alpha)
@@ -184,7 +189,7 @@ class LateralInhibition(SensoryTransform):
     Inverse: reverse-cumsum over frequency (approximate through the ReLU).
     """
 
-    def __init__(self, shape: Tuple[int, int]):
+    def __init__(self, shape: tuple[int, int]):
         self.in_shape = tuple(shape)
         self.out_shape = tuple(shape)
 
@@ -207,7 +212,7 @@ class LeakyIntegrator(SensoryTransform):
     ``x[t] = y[t] - a·y[t-1]``.
     """
 
-    def __init__(self, shape: Tuple[int, int], tau: float = 2.0):
+    def __init__(self, shape: tuple[int, int], tau: float = 2.0):
         self.in_shape = tuple(shape)
         self.out_shape = tuple(shape)
         self.tau = float(tau)
@@ -216,15 +221,15 @@ class LeakyIntegrator(SensoryTransform):
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
         # x: (B, F, T); scan over time
         a = self.a
-        xt = jnp.moveaxis(x, 2, 0)                     # (T, B, F)
+        xt = jnp.moveaxis(x, 2, 0)  # (T, B, F)
 
         def step(carry, cur):
             c = cur + a * carry
             return c, c
 
         init = jnp.zeros(xt.shape[1:])
-        _, ys = jax.lax.scan(step, init, xt)           # (T, B, F)
-        return jnp.moveaxis(ys, 0, 2)                  # (B, F, T)
+        _, ys = jax.lax.scan(step, init, xt)  # (T, B, F)
+        return jnp.moveaxis(ys, 0, 2)  # (B, F, T)
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
         yprev = jnp.concatenate([jnp.zeros_like(y[:, :, :1]), y[:, :, :-1]], axis=2)
@@ -246,10 +251,14 @@ class STRFBank(SensoryTransform):
     feature stage and kept invertible.
     """
 
-    def __init__(self, shape: Tuple[int, int],
-                 scales: Sequence[float] = (0.5, 1.0, 2.0, 4.0),
-                 rates: Sequence[float] = (2.0, 4.0, 8.0, 16.0),
-                 freq_size: int = 11, time_size: int = 11):
+    def __init__(
+        self,
+        shape: tuple[int, int],
+        scales: Sequence[float] = (0.5, 1.0, 2.0, 4.0),
+        rates: Sequence[float] = (2.0, 4.0, 8.0, 16.0),
+        freq_size: int = 11,
+        time_size: int = 11,
+    ):
         f, t = int(shape[0]), int(shape[1])
         self.in_shape = (f, t)
         fs = min(freq_size, f if f % 2 == 1 else f - 1)
@@ -266,10 +275,14 @@ class STRFBank(SensoryTransform):
         tt = np.linspace(0.0, 2.0, ts)
         kernels = []
         for Om in scales:
-            hs = (1.0 - (Om * xr) ** 2) * np.exp(-(Om * xr) ** 2 / 2.0)
+            hs = (1.0 - (Om * xr) ** 2) * np.exp(-((Om * xr) ** 2) / 2.0)
             hs = hs - hs.mean()
             for w in rates:
-                ht = (w * tt) ** 2 * np.exp(-3.5 * w * tt) * np.sin(2.0 * np.pi * w * tt / max(rates))
+                ht = (
+                    (w * tt) ** 2
+                    * np.exp(-3.5 * w * tt)
+                    * np.sin(2.0 * np.pi * w * tt / max(rates))
+                )
                 ht = ht - ht.mean()
                 down = np.outer(hs, ht)
                 up = np.outer(hs, ht[::-1])
@@ -279,15 +292,16 @@ class STRFBank(SensoryTransform):
         return kernels
 
     def _forward(self, x: jnp.ndarray) -> jnp.ndarray:
-        return self._bank.apply(x)                     # (B, n_filters, F, T)
+        return self._bank.apply(x)  # (B, n_filters, F, T)
 
     def _inverse(self, y: jnp.ndarray) -> jnp.ndarray:
-        return self._bank.reconstruct(y)               # (B, F, T)
+        return self._bank.reconstruct(y)  # (B, F, T)
 
 
 # --------------------------------------------------------------------------- #
 #  AuditoryInput                                                              #
 # --------------------------------------------------------------------------- #
+
 
 class AuditoryInput(SensoryInput):
     """A ``SensoryInput`` layer with a fixed cochlea→cortex feature transform.
@@ -303,14 +317,27 @@ class AuditoryInput(SensoryInput):
         activation, label: forwarded to ``SensoryInput``.
 
     Default output feature map: ``(n_mels, n_frames)`` (no STRF).
+
     """
 
-    def __init__(self, n_samples: int, *, sr: int = 16000, n_fft: int = 1024,
-                 hop: int = 512, n_mels: int = 64, fmin: float = 0.0,
-                 fmax: Optional[float] = None, alpha: float = 1.0 / 3.0,
-                 tau: float = 2.0, lateral_inhibition: bool = True,
-                 strf: bool = False, griffin_lim_iters: int = 24,
-                 activation=None, label: Optional[str] = None):
+    def __init__(
+        self,
+        n_samples: int,
+        *,
+        sr: int = 16000,
+        n_fft: int = 1024,
+        hop: int = 512,
+        n_mels: int = 64,
+        fmin: float = 0.0,
+        fmax: float | None = None,
+        alpha: float = 1.0 / 3.0,
+        tau: float = 2.0,
+        lateral_inhibition: bool = True,
+        strf: bool = False,
+        griffin_lim_iters: int = 24,
+        activation=None,
+        label: str | None = None,
+    ):
         mel = MelPower(n_samples, sr, n_fft, hop, n_mels, fmin, fmax, griffin_lim_iters)
         shape = mel.out_shape
         stages = [mel, PowerCompression(shape, alpha)]

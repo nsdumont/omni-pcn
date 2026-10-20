@@ -1,15 +1,14 @@
-"""
-Backprop baseline backend.
+"""Backprop baseline backend.
 
 Standard forward pass through predict connections + autodiff weight updates
 via optax. No PCN dynamics, errors, or precisions.
 """
 
-from typing import Dict, Tuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
+
 from ..core.structure import NetworkStructure
 from .simulation import ACTIVATIONS
 
@@ -34,7 +33,7 @@ def _forward(values_list, predict_conns, predict_weights, activation_types, clam
 
 @eqx.filter_jit
 def run_backprop_batch(
-    sample: Dict[str, jnp.ndarray],
+    sample: dict[str, jnp.ndarray],
     predict_weights: tuple,
     structure: NetworkStructure,
     data_map: tuple,
@@ -42,9 +41,8 @@ def run_backprop_batch(
     optimizer: optax.GradientTransformation,
     opt_state: optax.OptState,
     learning: bool = True,
-) -> Tuple[tuple, optax.OptState, tuple, jnp.ndarray]:
-    """
-    Run a single backprop batch: forward pass, compute loss, update weights.
+) -> tuple[tuple, optax.OptState, tuple, jnp.ndarray]:
+    """Run a single backprop batch: forward pass, compute loss, update weights.
 
     Args:
         sample: Dict of data arrays.
@@ -62,6 +60,7 @@ def run_backprop_batch(
         opt_state: Updated (or unchanged) optimizer state.
         values: Final layer values as a tuple.
         loss: Scalar loss value.
+
     """
     layer_dims = structure.layer_dims
     predict_conns = structure.predict_conns
@@ -78,8 +77,7 @@ def run_backprop_batch(
 
     # Forward pass (for the returned values)
     values_list = _forward(
-        values_list, predict_conns, predict_weights,
-        activation_types, clamped_layer_indices
+        values_list, predict_conns, predict_weights, activation_types, clamped_layer_indices
     )
     values = tuple(values_list)
 
