@@ -359,6 +359,9 @@ class Simulation:
         2. Learning phase: if learning_iterations_per_sample == 0 (default),
            perform a single weight update at equilibrium. Otherwise, run that
            many additional iterations with simultaneous inference + learning.
+           Every learned parameter (predict weights/biases, precision
+           weights/biases, Project/Modulate weights) steps together: once per
+           batch at 0, once per learning iteration otherwise.
 
         Args:
             dataloader: Iterable yielding dicts of batched numpy/JAX arrays.

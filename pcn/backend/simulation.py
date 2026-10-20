@@ -544,7 +544,6 @@ def _combined_step(
     train_regs: tuple = (),
     key = None,
     labels = None,
-    update_precision: bool = True,
     is_stochastic: bool = False,
     # Mechanism 1: precision-targeting Project/Modulate
     project_conns_precision: tuple = (),
@@ -601,11 +600,11 @@ def _combined_step(
     their weights are learned by a separate gradient call on L using the
     resolved inputs spec (the energy-based no-loss_fn path has been removed).
 
-    Args:
-        update_precision: If False, precision params are stop_gradiented
-            (no gradient, no effective update). Used to freeze precision
-            during iterative learning loops and update precision only in
-            the final step, preventing the precision-error feedback loop.
+    Precision weights/biases follow the predict-weight convention: a conn
+    that learns them (``learn_precision_weights`` / ``learn_precision_bias``,
+    and not ``has_fixed_weights``) steps them on every call, exactly when its
+    predict weights step; otherwise they are stop_gradiented and restored
+    bit-exact after the optimizer step.
 
     Returns:
         (new_values, errors, precisions,
@@ -704,13 +703,8 @@ def _combined_step(
             else:
                 pw_i = pw[i]
                 pb_i = pb[i] if conn.has_bias else jax.lax.stop_gradient(pb[i])
-                # When update_precision=False, always stop_gradient precision
-                # params to prevent the precision-error feedback loop in
-                # iterative combined_step loops.
-                _learn_ppw = conn.learn_precision_weights and update_precision
-                _learn_ppb = conn.learn_precision_bias and update_precision
-                ppw_i = ppw[i] if _learn_ppw else jax.lax.stop_gradient(ppw[i])
-                ppb_i = ppb[i] if _learn_ppb else jax.lax.stop_gradient(ppb[i])
+                ppw_i = ppw[i] if conn.learn_precision_weights else jax.lax.stop_gradient(ppw[i])
+                ppb_i = ppb[i] if conn.learn_precision_bias else jax.lax.stop_gradient(ppb[i])
 
             pre_value = conn.get_pre_value(mod_vals, delayed_srcs=dsrc) if conn.is_res else None
             prediction = conn.prediction(pre_act, pw_i, pb_i, pre_value)
@@ -2482,10 +2476,9 @@ def run_batch(
                 )
                 # errors/precisions are pre-update; not used after this point
             else:
-                # Precision is frozen during the iterative learning loop
-                # (update_precision=False) to prevent the precision-error
-                # feedback loop.  A single precision update happens after
-                # the loop via a final combined_step with update_precision=True.
+                # Simultaneous inference + learning: every iteration steps the
+                # values and all learned params (predict, precision, Project/
+                # Modulate) once — n_learning_iterations optimizer steps.
                 def learning_body(i, carry):
                     values, energies_list, values_log, errors_log, precisions_log, deltas_log, pw, pb, prw, prb, mw, mb, ppw, ppb, params_opt_st, vos, hist = carry
 
@@ -2522,7 +2515,6 @@ def run_batch(
                         reward_fns, loss_fns, loss_fn_sample_arrays,
                         spatial_layers, spatial_neighborhoods,
                         inference_regs, train_regs, learn_key, labels,
-                        update_precision=False,
                         is_stochastic=is_stochastic,
                         project_conns_precision=project_conns_precision,
                         modulate_conns_precision=modulate_conns_precision,
@@ -2626,65 +2618,6 @@ def run_batch(
                      modulate_weights, modulate_biases,
                      precision_weights, precision_biases, new_params_opt_state, _values_opt_state, hist)
                 )
-
-                # Final step: update precision with the converged values/weights.
-                # This gives precision one gradient step per sample, at the
-                # equilibrium point, rather than N steps during the transient.
-                _has_learnable_prec = any(
-                    c.learn_precision_weights or c.learn_precision_bias
-                    for c in predict_conns)
-                if _has_learnable_prec:
-                    clamped_last = tuple(c[:, -1, :] for c in clamped)
-                    prec_key = jax.random.fold_in(
-                        key, n_iterations + n_learning_iterations)
-                    # Reconstruct the one-step carries from the rings the
-                    # learning loop left behind (tick_base past its last write).
-                    errors = _reconstruct_ep(
-                        hist, err_buf_idx, n_iterations + n_learning_iterations, 0)
-                    precisions = _reconstruct_ep(
-                        hist, prec_buf_idx, n_iterations + n_learning_iterations, 0)
-                    (values, errors, precisions,
-                     predict_weights, predict_biases,
-                     project_weights, project_biases,
-                     modulate_weights, modulate_biases,
-                     precision_weights, precision_biases,
-                     _values_opt_state, new_params_opt_state) = _combined_step(
-                        values, errors, clamped_last,
-                        predict_weights, predict_biases,
-                        project_weights, project_biases,
-                        modulate_weights, modulate_biases,
-                        precision_weights, precision_biases,
-                        predict_conns, project_conns, modulate_conns,
-                        project_conns_internal, project_conns_value,
-                        modulate_conns_internal, modulate_conns_value,
-                        activation_fns, _values_optimizer, _values_opt_state,
-                        _params_optimizer, new_params_opt_state,
-                        gd_loss_project, gd_loss_modulate,
-                        reward_fns, loss_fns, loss_fn_sample_arrays,
-                        spatial_layers, spatial_neighborhoods,
-                        inference_regs, train_regs, prec_key, labels,
-                        is_boundary=_not_a_boundary,
-                        update_precision=True,
-                        is_stochastic=is_stochastic,
-                        project_conns_precision=project_conns_precision,
-                        modulate_conns_precision=modulate_conns_precision,
-                        modulate_conns_flow_pre=modulate_conns_flow_pre,
-                        modulate_conns_flow_post=modulate_conns_flow_post,
-                        predict_has_flow_gates=predict_has_flow_gates,
-                        structural_attention_groups=structural_attention_groups,
-                        pre_scales=predict_pre_scales,
-                        predict_weight_masks=predict_weight_masks,
-                        project_weight_masks=project_weight_masks,
-                        modulate_weight_masks=modulate_weight_masks,
-                        predict_error_activations=predict_error_activations,
-                        predict_precision_activations=predict_precision_activations,
-                        prev_precisions=precisions,
-                        layer_activations=_layer_acts,
-                        # Final precision step after the sequence: read delayed
-                        # from the rings left by the learning loop (no new write).
-                        hist=hist, tick_base=n_iterations + n_learning_iterations,
-                        iter_idx=0, iters_per_timestep=iters_per_timestep,
-                    )
 
     new_params = NetworkParams(
         predict_weights=list(predict_weights),

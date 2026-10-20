@@ -89,7 +89,6 @@ def run_bptt_batch(
     params_optimizer=None,
     params_opt_state=None,
     is_stochastic: bool = False,
-    update_precision: bool = True,
     remat: bool = True,
     spatial_neighborhoods: tuple = (),
     predict_weight_masks: tuple = (),
@@ -101,9 +100,12 @@ def run_bptt_batch(
     """
     Run one BPTT batch: init -> clamp -> unrolled inference -> one weight update.
 
-    Trainable (receives the BPTT gradient): predict weights/biases and — when
-    ``update_precision`` — precision weights/biases. Project/Modulate weights
-    and biases pass through unchanged.
+    Trainable (receives the BPTT gradient): predict weights/biases and
+    precision weights/biases, gated per conn exactly as in ``run_batch``
+    (``has_fixed_weights`` freezes all four; otherwise ``has_bias``,
+    ``learn_precision_weights`` and ``learn_precision_bias`` gate theirs).
+    Frozen params are stop_gradiented and restored bit-exact after the
+    optimizer step. Project/Modulate weights and biases pass through unchanged.
 
     Returns:
         new_params, new_params_opt_state, new_values_opt_state,
@@ -376,9 +378,15 @@ def run_bptt_batch(
         pb = trainable_params['predict_biases']
         ppw = trainable_params['precision_weights']
         ppb = trainable_params['precision_biases']
-        if not update_precision:
-            ppw = tuple(lax.stop_gradient(w) for w in ppw)
-            ppb = tuple(lax.stop_gradient(b) for b in ppb)
+        sg = lax.stop_gradient
+        fixed = tuple(c.has_fixed_weights for c in predict_conns)
+        pw = tuple(sg(w) if f else w for w, f in zip(pw, fixed))
+        pb = tuple(b if c.has_bias and not f else sg(b)
+                   for b, c, f in zip(pb, predict_conns, fixed))
+        ppw = tuple(w if c.learn_precision_weights and not f else sg(w)
+                    for w, c, f in zip(ppw, predict_conns, fixed))
+        ppb = tuple(b if c.learn_precision_bias and not f else sg(b)
+                    for b, c, f in zip(ppb, predict_conns, fixed))
 
         if _needs_prec_carry_init:
             precisions_carry_init = tuple(
@@ -562,20 +570,36 @@ def run_bptt_batch(
 
     new_pw = [rebuild_weight(o, l)
               for o, l in zip(predict_weights, new_trainable['predict_weights'])]
-    if predict_weight_masks:
-        for i, conn in enumerate(predict_conns):
-            if conn.is_masked and not conn.is_sparse:
-                new_pw[i] = new_pw[i] * predict_weight_masks[i]
+    new_pb = list(new_trainable['predict_biases'])
+    new_ppw = list(new_trainable['precision_weights'])
+    new_ppb = list(new_trainable['precision_biases'])
+    # Restore frozen params (zero gradient alone still lets momentum / weight
+    # decay move them).
+    for i, conn in enumerate(predict_conns):
+        if conn.has_fixed_weights:
+            new_pw[i] = predict_weights[i]
+            new_pb[i] = predict_biases[i]
+            new_ppw[i] = precision_weights[i]
+            new_ppb[i] = precision_biases[i]
+            continue
+        if not conn.has_bias:
+            new_pb[i] = predict_biases[i]
+        if not conn.learn_precision_weights:
+            new_ppw[i] = precision_weights[i]
+        if not conn.learn_precision_bias:
+            new_ppb[i] = precision_biases[i]
+        if predict_weight_masks and conn.is_masked and not conn.is_sparse:
+            new_pw[i] = new_pw[i] * predict_weight_masks[i]
 
     new_params = NetworkParams(
         predict_weights=new_pw,
-        predict_biases=list(new_trainable['predict_biases']),
+        predict_biases=new_pb,
         project_weights=list(project_weights),
         project_biases=list(project_biases),
         modulate_weights=list(modulate_weights),
         modulate_biases=list(modulate_biases),
-        precision_weights=list(new_trainable['precision_weights']),
-        precision_biases=list(new_trainable['precision_biases']),
+        precision_weights=new_ppw,
+        precision_biases=new_ppb,
     )
 
     values_log = tuple(v[None] for v in final_values)

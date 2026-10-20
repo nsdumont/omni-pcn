@@ -57,5 +57,7 @@ def test_conn_consumes_standardized_pre():
                    log_every=1, verbose=False)
     e = np.asarray(res['errors'][0])
     f = -(e[:, -1] if e.ndim == 3 else e)   # e = v_b - f(v_a) = -f(v_a)
-    assert np.abs(f.mean(axis=0)).max() < 1e-4
-    assert np.abs(f.std(axis=0) - 1).max() < 5e-3
+    # atol covers CUDA's default TF32 matmul (~5e-4 here); an unstandardized
+    # pre would be off by ~5.
+    np.testing.assert_allclose(
+        f, np.asarray(pcn.BatchStandardize.fn(jnp.asarray(va))), atol=5e-3)

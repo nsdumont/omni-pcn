@@ -41,7 +41,6 @@ class BPTTSimulation(Simulation):
             training data_map — training-time dynamics are test-time dynamics.
         truncation: None (full BPTT), K>=1 (TBPTT window of K iterations), or
             0 (exact PC gradient at the final state — energy modes only).
-        update_precision: If False, precision params get zero gradient.
         remat: Checkpoint the scan body (memory O(step) at ~1 extra forward).
 
     Example:
@@ -59,13 +58,11 @@ class BPTTSimulation(Simulation):
         loss_mode: str = 'energy_final',
         objective_fn=None,
         truncation: Optional[int] = None,
-        update_precision: bool = True,
         remat: bool = True,
     ):
         super().__init__(net)
         self.loss_mode = loss_mode
         self.truncation = truncation
-        self.update_precision = update_precision
         self.remat = remat
         # Backend calls objective_fn(values, sample, t); wrap 2-arg user fns
         # ONCE here so the jitted backend sees a stable callable across batches.
@@ -167,7 +164,6 @@ class BPTTSimulation(Simulation):
                     params_optimizer=self._bptt_params_optimizer,
                     params_opt_state=self._bptt_params_opt_state,
                     is_stochastic=is_stochastic,
-                    update_precision=self.update_precision,
                     remat=self.remat,
                     spatial_neighborhoods=getattr(self.net, 'spatial_neighborhoods', ()),
                     predict_weight_masks=self.net.donatable_weight_masks('predict'),

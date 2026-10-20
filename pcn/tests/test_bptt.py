@@ -240,11 +240,21 @@ class TestBPTTBackend:
                 float(jnp.max(jnp.abs(nw - ow))) > 1e-8
                 for nw, ow in zip(new_params.predict_weights, pw0))
 
-    def test_update_precision_false_freezes_precision_params(
-            self, simple_network, rng_key):
+    def test_learn_precision_false_freezes_precision_params(self, rng_key):
+        """Per-conn learn_precision=False freezes precision under BPTT, as in
+        run_batch (more flag cases: test_precision_schedule.py)."""
+        import pcn
         from pcn.backend.bptt_simulation import run_bptt_batch
 
-        net, _ = simple_network
+        # simple_network with precision learning off on both conns.
+        net = pcn.PCNetwork(seed=0)
+        with net:
+            l1 = pcn.Layer(dim=16, activation=pcn.Direct(), label="input")
+            l2 = pcn.Layer(dim=8, activation=pcn.Relu(), label="hidden")
+            l3 = pcn.Layer(dim=4, activation=pcn.Softmax(), label="output")
+            pcn.Predict(l2, l1, learn_precision=False)
+            pcn.Predict(l3, l2, learn_precision=False)
+        net.build()
         ppw0 = tuple(jnp.array(w) for w in net.params.precision_weights)
         ppb0 = tuple(jnp.array(b) for b in net.params.precision_biases)
 
@@ -252,7 +262,7 @@ class TestBPTTBackend:
             {k: jnp.array(v) for k, v in _mk_sample(rng_key).items()},
             _copy_params(net.params), net.structure,
             DATA_MAP, 6,
-            params_optimizer=optax.sgd(1e-2), update_precision=False)
+            params_optimizer=optax.adamw(1e-2, weight_decay=0.5))
 
         for nw, ow in zip(new_params.precision_weights, ppw0):
             np.testing.assert_array_equal(np.asarray(nw), np.asarray(ow))
